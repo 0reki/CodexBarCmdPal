@@ -56,10 +56,11 @@ internal sealed partial class CodexBarCommandsProvider : CommandProvider
                 "CodexBar"),
         ];
 
+        RefreshAsync().GetAwaiter().GetResult();
         _refreshTimer = new Timer(
             _ => _ = RefreshAsync(),
             null,
-            TimeSpan.Zero,
+            TimeSpan.FromSeconds(5),
             TimeSpan.FromSeconds(5));
     }
 

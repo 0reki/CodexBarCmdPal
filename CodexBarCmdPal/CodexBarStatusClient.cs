@@ -1,15 +1,9 @@
 using System.IO.Pipes;
-using System.Text.Json;
-
 namespace CodexBarCmdPal;
 
 internal sealed class CodexBarStatusClient
 {
     private const string PipeName = "WinCodexBar.Status";
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-    };
 
     public async Task<CodexBarStatusSnapshot?> ReadSnapshotAsync(
         CancellationToken cancellationToken = default)
@@ -26,14 +20,15 @@ internal sealed class CodexBarStatusClient
             timeout.CancelAfter(TimeSpan.FromMilliseconds(750));
 
             await pipe.ConnectAsync(timeout.Token).ConfigureAwait(false);
-            return await JsonSerializer.DeserializeAsync<CodexBarStatusSnapshot>(
+            return await System.Text.Json.JsonSerializer.DeserializeAsync(
                     pipe,
-                    JsonOptions,
+                    CodexBarJsonContext.Default.CodexBarStatusSnapshot,
                     timeout.Token)
                 .ConfigureAwait(false);
         }
-        catch
+        catch (Exception ex)
         {
+            ExtensionLog.Write($"ReadSnapshotAsync failed: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
     }

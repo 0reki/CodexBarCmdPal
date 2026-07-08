@@ -55,12 +55,6 @@ internal sealed class CodexBarProviderSnapshot
     [JsonPropertyName("topModel")]
     public string? TopModel { get; set; }
 
-    [JsonPropertyName("planName")]
-    public string? PlanName { get; set; }
-
-    [JsonPropertyName("accountEmail")]
-    public string? AccountEmail { get; set; }
-
     [JsonPropertyName("updatedAt")]
     public string? UpdatedAt { get; set; }
 

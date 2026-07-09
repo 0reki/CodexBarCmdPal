@@ -12,7 +12,20 @@ Prerequisites:
 - .NET 9 SDK, or Visual Studio 2022 with the .NET 9 desktop workload.
 - CodexBar Desktop running, otherwise the dock bands will show an offline state.
 
-Build:
+Build and install:
+
+```powershell
+.\scripts\install.ps1
+```
+
+If .NET SDK or Windows SDK is missing, let the script install what it can through
+`winget`:
+
+```powershell
+.\scripts\install.ps1 -InstallMissing
+```
+
+Manual Visual Studio flow:
 
 1. Open `CodexBarCmdPal.sln` in Visual Studio.
 2. Select `x64` as the solution platform.

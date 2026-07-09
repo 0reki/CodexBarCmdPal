@@ -1,0 +1,128 @@
+name: Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package ${{ matrix.arch }}
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            platform: x86
+            rid: win-x86
+          - arch: x64
+            platform: x64
+            rid: win-x64
+          - arch: arm64
+            platform: ARM64
+            rid: win-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Resolve build metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $uapRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\Platforms\UAP"
+          $sdk = Get-ChildItem $uapRoot -Directory |
+            Where-Object { Test-Path (Join-Path $_.FullName "Platform.xml") } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1
+
+          if (-not $sdk) {
+            throw "No Windows SDK UAP platform with Platform.xml was found under $uapRoot."
+          }
+
+          [xml]$manifest = Get-Content "CodexBarCmdPal\Package.appxmanifest"
+          $version = $manifest.Package.Identity.Version
+
+          "platform=${{ matrix.platform }}" >> $env:GITHUB_OUTPUT
+          "windows_sdk=$($sdk.Name)" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Create signing certificate
+        id: cert
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate `
+            -Type Custom `
+            -Subject "CN=CodexBarCmdPal" `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "CodexBarCmdPal Test Certificate" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3")
+
+          New-Item -ItemType Directory -Force -Path "artifacts\cert" | Out-Null
+          Export-Certificate -Cert $cert -FilePath "artifacts\cert\CodexBarCmdPal.cer" -Force | Out-Null
+          "thumbprint=$($cert.Thumbprint)" >> $env:GITHUB_OUTPUT
+
+      - name: Publish MSIX
+        shell: pwsh
+        run: |
+          dotnet publish .\CodexBarCmdPal\CodexBarCmdPal.csproj `
+            -c Release `
+            -p:Platform=${{ steps.meta.outputs.platform }} `
+            -p:RuntimeIdentifier=${{ matrix.rid }} `
+            -p:CodexBarWindowsTargetVersion=${{ steps.meta.outputs.windows_sdk }} `
+            -p:GenerateAppxPackageOnBuild=true `
+            -p:AppxPackageSigningEnabled=true `
+            -p:PackageCertificateThumbprint=${{ steps.cert.outputs.thumbprint }}
+
+      - name: Create release zip
+        id: zip
+        shell: pwsh
+        run: |
+          $version = "${{ steps.meta.outputs.version }}"
+          $arch = "${{ matrix.arch }}"
+          $name = "CodexBarCmdPal_${version}_${arch}"
+          $staging = Join-Path "artifacts" $name
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+
+          $pkgRoot = "CodexBarCmdPal\AppPackages"
+          $msix = Get-ChildItem $pkgRoot -Recurse -Filter *.msix |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $msix) {
+            throw "No .msix package was generated under $pkgRoot."
+          }
+
+          Copy-Item $msix.FullName (Join-Path $staging $msix.Name)
+          Copy-Item "artifacts\cert\CodexBarCmdPal.cer" (Join-Path $staging "CodexBarCmdPal.cer")
+          Copy-Item "scripts\install-package.ps1" (Join-Path $staging "install.ps1")
+
+          $zip = "artifacts\$name.zip"
+          Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $zip -Force
+
+          "path=$zip" >> $env:GITHUB_OUTPUT
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.zip.outputs.name }}
+          path: ${{ steps.zip.outputs.path }}
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.zip.outputs.path }}

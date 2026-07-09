@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <Platforms>x64;ARM64</Platforms>
+    <Platforms>x86;x64;ARM64</Platforms>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisMode>Recommended</AnalysisMode>
     <_SkipUpgradeNetAnalyzersNuGetWarning>true</_SkipUpgradeNetAnalyzersNuGetWarning>

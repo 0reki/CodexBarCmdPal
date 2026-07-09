@@ -2,7 +2,7 @@ using System.Text.Json.Serialization;
 
 namespace CodexBarCmdPal;
 
-internal sealed class CodexBarStatusSnapshot
+internal sealed class CodexToysStatusSnapshot
 {
     [JsonPropertyName("version")]
     public int Version { get; set; }
@@ -11,10 +11,10 @@ internal sealed class CodexBarStatusSnapshot
     public string? UpdatedAt { get; set; }
 
     [JsonPropertyName("providers")]
-    public List<CodexBarProviderSnapshot> Providers { get; set; } = [];
+    public List<CodexToysProviderSnapshot> Providers { get; set; } = [];
 }
 
-internal sealed class CodexBarProviderSnapshot
+internal sealed class CodexToysProviderSnapshot
 {
     [JsonPropertyName("id")]
     public string Id { get; set; } = "";
@@ -32,13 +32,13 @@ internal sealed class CodexBarProviderSnapshot
     public string? PrimaryLabel { get; set; }
 
     [JsonPropertyName("primary")]
-    public CodexBarRateWindowSnapshot? Primary { get; set; }
+    public CodexToysRateWindowSnapshot? Primary { get; set; }
 
     [JsonPropertyName("secondaryLabel")]
     public string? SecondaryLabel { get; set; }
 
     [JsonPropertyName("secondary")]
-    public CodexBarRateWindowSnapshot? Secondary { get; set; }
+    public CodexToysRateWindowSnapshot? Secondary { get; set; }
 
     [JsonPropertyName("todayCost")]
     public double? TodayCost { get; set; }
@@ -55,6 +55,12 @@ internal sealed class CodexBarProviderSnapshot
     [JsonPropertyName("topModel")]
     public string? TopModel { get; set; }
 
+    [JsonPropertyName("dailyCosts")]
+    public List<CodexToysDailyCostPoint> DailyCosts { get; set; } = [];
+
+    [JsonPropertyName("hourlyCosts")]
+    public List<CodexToysHourlyUsagePoint> HourlyCosts { get; set; } = [];
+
     [JsonPropertyName("updatedAt")]
     public string? UpdatedAt { get; set; }
 
@@ -62,7 +68,7 @@ internal sealed class CodexBarProviderSnapshot
     public string? Error { get; set; }
 }
 
-internal sealed class CodexBarRateWindowSnapshot
+internal sealed class CodexToysRateWindowSnapshot
 {
     [JsonPropertyName("usedPercent")]
     public double UsedPercent { get; set; }
@@ -81,4 +87,28 @@ internal sealed class CodexBarRateWindowSnapshot
 
     [JsonPropertyName("isExhausted")]
     public bool IsExhausted { get; set; }
+}
+
+internal sealed class CodexToysDailyCostPoint
+{
+    [JsonPropertyName("date")]
+    public string Date { get; set; } = "";
+
+    [JsonPropertyName("cost")]
+    public double Cost { get; set; }
+
+    [JsonPropertyName("tokens")]
+    public ulong Tokens { get; set; }
+}
+
+internal sealed class CodexToysHourlyUsagePoint
+{
+    [JsonPropertyName("hour")]
+    public int Hour { get; set; }
+
+    [JsonPropertyName("cost")]
+    public double Cost { get; set; }
+
+    [JsonPropertyName("tokens")]
+    public ulong Tokens { get; set; }
 }

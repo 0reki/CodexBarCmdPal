@@ -4,7 +4,7 @@ internal static class ExtensionLog
 {
     private static readonly string LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "CodexBarCmdPal",
+            "CodexToys",
         "extension.log");
 
     public static void Write(string message)

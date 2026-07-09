@@ -17,12 +17,12 @@ Import-Certificate -FilePath $cer.FullName -CertStoreLocation Cert:\CurrentUser\
 Import-Certificate -FilePath $cer.FullName -CertStoreLocation Cert:\CurrentUser\TrustedPeople | Out-Null
 
 Write-Host "Stopping Command Palette..."
-Get-Process CodexBarCmdPal, Microsoft.CmdPal.UI -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process CodexToys, Microsoft.CmdPal.UI -ErrorAction SilentlyContinue | Stop-Process -Force
 
 Write-Host "Installing $($msix.Name)..."
 Add-AppxPackage -Path $msix.FullName -ForceApplicationShutdown
 
 Write-Host ""
-Get-AppxPackage CodexBarCmdPal | Select-Object Name, Version, PackageFullName
+Get-AppxPackage CodexToys | Select-Object Name, Version, PackageFullName
 Write-Host ""
-Write-Host "Installed. Open Command Palette and reload extensions if CodexBar does not appear immediately."
+Write-Host "Installed. Open Command Palette and reload extensions if CodexToys does not appear immediately."

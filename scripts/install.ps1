@@ -75,7 +75,7 @@ function Find-WindowsSdkTargetVersion {
 
 function Ensure-SigningCertificate {
   $cert = Get-ChildItem Cert:\CurrentUser\My |
-    Where-Object { $_.Subject -eq "CN=CodexBarCmdPal" } |
+    Where-Object { $_.Subject -eq "CN=CodexToys" } |
     Sort-Object NotAfter -Descending |
     Select-Object -First 1
 
@@ -86,9 +86,9 @@ function Ensure-SigningCertificate {
   Write-Step "Creating local signing certificate"
   New-SelfSignedCertificate `
     -Type Custom `
-    -Subject "CN=CodexBarCmdPal" `
+    -Subject "CN=CodexToys" `
     -KeyUsage DigitalSignature `
-    -FriendlyName "CodexBarCmdPal Test Certificate" `
+    -FriendlyName "CodexToys Test Certificate" `
     -CertStoreLocation "Cert:\CurrentUser\My" `
     -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3")
 }
@@ -161,7 +161,7 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $projectPath = Join-Path $repoRoot "CodexBarCmdPal\CodexBarCmdPal.csproj"
 $manifestPath = Join-Path $repoRoot "CodexBarCmdPal\Package.appxmanifest"
 $packageRoot = Join-Path $repoRoot "CodexBarCmdPal\AppPackages"
-$cerPath = Join-Path $env:TEMP "CodexBarCmdPal.cer"
+$cerPath = Join-Path $env:TEMP "CodexToys.cer"
 
 Write-Step "Checking tools"
 $dotnet = Find-DotNet
@@ -207,13 +207,13 @@ if (-not $msix) {
   throw "No .msix package was found under $($pkgDir.FullName)."
 }
 
-Get-Process CodexBarCmdPal, Microsoft.CmdPal.UI -ErrorAction SilentlyContinue |
+Get-Process CodexToys, Microsoft.CmdPal.UI -ErrorAction SilentlyContinue |
   Stop-Process -Force
 
 Add-AppxPackage -Path $msix.FullName -ForceApplicationShutdown
 
 Write-Step "Installed package"
-Get-AppxPackage CodexBarCmdPal | Select-Object Name, Version, PackageFullName
+Get-AppxPackage CodexToys | Select-Object Name, Version, PackageFullName
 
 Write-Host ""
 Write-Host "Open Command Palette and reload extensions if the Dock does not update immediately." -ForegroundColor Green

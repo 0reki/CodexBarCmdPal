@@ -3,7 +3,7 @@ using Microsoft.CommandPalette.Extensions.Toolkit;
 
 namespace CodexBarCmdPal;
 
-internal sealed partial class CodexBarCommandsProvider : CommandProvider
+internal sealed partial class CodexToysCommandsProvider : CommandProvider
 {
     private static readonly IconInfo CodexIcon =
         IconHelpers.FromRelativePaths("Assets/codex-light.svg", "Assets/codex-dark.svg");
@@ -13,7 +13,9 @@ internal sealed partial class CodexBarCommandsProvider : CommandProvider
         IconHelpers.FromRelativePaths("Assets/calendar-days-light.svg", "Assets/calendar-days-dark.svg");
     private static readonly IconInfo TokensIcon =
         IconHelpers.FromRelativePaths("Assets/coins-light.svg", "Assets/coins-dark.svg");
-    private readonly CodexBarStatusClient _client = new();
+    private readonly CodexToysSettings _settings = new();
+    private readonly CodexToysStatusClient _client;
+    private readonly CodexToysStatusPage _statusPage;
     private readonly ICommandItem[] _topLevelCommands;
     private readonly ICommandItem[] _dockBands;
     private readonly ListItem _usageItem;
@@ -21,47 +23,49 @@ internal sealed partial class CodexBarCommandsProvider : CommandProvider
     private readonly ListItem _thirtyDayItem;
     private readonly ListItem _tokensItem;
     private readonly Timer _refreshTimer;
-    private CodexBarStatusSnapshot? _snapshot;
+    private CodexToysStatusSnapshot? _snapshot;
 
-    public CodexBarCommandsProvider()
+    public CodexToysCommandsProvider()
     {
-        Id = "CodexBar";
-        DisplayName = "CodexBar";
+        Id = "CodexToys";
+        DisplayName = "CodexToys";
         Icon = CodexIcon;
-        ExtensionLog.Write("CodexBarCommandsProvider constructed");
+        Settings = _settings.Settings;
+        ExtensionLog.Write("CodexToysCommandsProvider constructed");
+        _client = new CodexToysStatusClient(_settings);
+        _settings.SettingsChanged += OnSettingsChanged;
 
-        var statusPage = new CodexBarStatusPage(_client, _snapshot)
+        _statusPage = new CodexToysStatusPage(_client, _snapshot, CodexToysDetailMode.Overview, CodexIcon)
         {
-            Id = "codexbar.page.status",
+            Id = "codextoys.page.status",
         };
         _topLevelCommands =
         [
-            new CommandItem(statusPage)
+            new CommandItem(_statusPage)
             {
-                Title = "CodexBar",
+                Title = "CodexToys",
                 Subtitle = "Open usage details",
                 Icon = CodexIcon,
             },
         ];
 
-        _usageItem = DockItem("codexbar.dock.usage", "--", "Codex", CodexIcon);
-        _todayItem = DockItem("codexbar.dock.today", "--", "Today", TodayIcon);
-        _thirtyDayItem = DockItem("codexbar.dock.thirtyDay", "--", "30d", ThirtyDayIcon);
-        _tokensItem = DockItem("codexbar.dock.tokens", "--", "Tokens", TokensIcon);
+        _usageItem = DockItem("codextoys.dock.usage", "--", "Codex", CodexIcon, CodexToysDetailMode.Overview);
+        _todayItem = DockItem("codextoys.dock.today", "--", "Today", TodayIcon, CodexToysDetailMode.TodayCost);
+        _thirtyDayItem = DockItem("codextoys.dock.thirtyDay", "--", "30d", ThirtyDayIcon, CodexToysDetailMode.ThirtyDayCost);
+        _tokensItem = DockItem("codextoys.dock.tokens", "--", "Tokens", TokensIcon, CodexToysDetailMode.Tokens);
         _dockBands =
         [
             new WrappedDockItem(
                 [_usageItem, _todayItem, _thirtyDayItem, _tokensItem],
-                "codexbar.dock.band",
-                "CodexBar"),
+                "codextoys.dock.band",
+                "CodexToys"),
         ];
 
-        RefreshAsync().GetAwaiter().GetResult();
         _refreshTimer = new Timer(
-            _ => _ = RefreshAsync(),
+            _ => QueueRefresh(),
             null,
-            TimeSpan.FromSeconds(5),
-            TimeSpan.FromSeconds(5));
+            TimeSpan.FromSeconds(1),
+            _settings.RefreshInterval);
     }
 
     public override ICommandItem[] TopLevelCommands()
@@ -80,20 +84,43 @@ internal sealed partial class CodexBarCommandsProvider : CommandProvider
     {
         return id switch
         {
-            "codexbar.dock.band" => _dockBands[0],
-            "codexbar.dock.usage" => _usageItem,
-            "codexbar.dock.today" => _todayItem,
-            "codexbar.dock.thirtyDay" => _thirtyDayItem,
-            "codexbar.dock.tokens" => _tokensItem,
-            "codexbar.page.status" => _topLevelCommands[0],
+            "codextoys.dock.band" => _dockBands[0],
+            "codextoys.dock.usage" => _usageItem,
+            "codextoys.dock.today" => _todayItem,
+            "codextoys.dock.thirtyDay" => _thirtyDayItem,
+            "codextoys.dock.tokens" => _tokensItem,
+            "codextoys.page.status" => _topLevelCommands[0],
             _ => null,
         };
     }
 
     public override void Dispose()
     {
+        _settings.SettingsChanged -= OnSettingsChanged;
         _refreshTimer.Dispose();
         base.Dispose();
+    }
+
+    private void OnSettingsChanged(object? sender, EventArgs e)
+    {
+        _client.ClearCache();
+        _refreshTimer.Change(TimeSpan.FromSeconds(1), _settings.RefreshInterval);
+        QueueRefresh();
+    }
+
+    private void QueueRefresh()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await RefreshAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                ExtensionLog.Write($"Refresh failed: {ex.GetType().Name}: {ex.Message}");
+            }
+        });
     }
 
     private async Task RefreshAsync()
@@ -107,7 +134,7 @@ internal sealed partial class CodexBarCommandsProvider : CommandProvider
         UpdateDockItems();
     }
 
-    private static CodexBarProviderSnapshot? PreferredProvider(CodexBarStatusSnapshot? snapshot)
+    private static CodexToysProviderSnapshot? PreferredProvider(CodexToysStatusSnapshot? snapshot)
     {
         if (snapshot?.Providers.Count > 0 != true)
         {
@@ -119,16 +146,22 @@ internal sealed partial class CodexBarCommandsProvider : CommandProvider
             ?? snapshot.Providers[0];
     }
 
-    private static string OfflineSubtitle(CodexBarStatusSnapshot? snapshot)
+    private static string OfflineSubtitle(CodexToysStatusSnapshot? snapshot)
     {
         return snapshot is null
-            ? "CodexBar offline"
+            ? "No local usage"
             : $"Updated {snapshot.UpdatedAt ?? "recently"}";
     }
 
-    private static ListItem DockItem(string id, string title, string subtitle, IconInfo icon)
+    private ListItem DockItem(string id, string title, string subtitle, IconInfo icon, CodexToysDetailMode mode)
     {
-        return new ListItem(new NoOpCommand { Id = id, Name = title })
+        var command = new CodexToysStatusPage(_client, _snapshot, mode, icon)
+        {
+            Id = id,
+            Name = title,
+        };
+
+        return new ListItem(command)
         {
             Title = title,
             Subtitle = subtitle,
@@ -167,7 +200,7 @@ internal sealed partial class CodexBarCommandsProvider : CommandProvider
         }
     }
 
-    private static string SecondaryUsage(CodexBarProviderSnapshot provider)
+    private static string SecondaryUsage(CodexToysProviderSnapshot provider)
     {
         if (provider.Secondary is not null && !string.IsNullOrWhiteSpace(provider.SecondaryLabel))
         {

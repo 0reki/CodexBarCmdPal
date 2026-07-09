@@ -6,20 +6,20 @@ namespace CodexBarCmdPal;
 [ComVisible(true)]
 [Guid("00f37f09-1369-4fe4-82a7-8c41796ca5fc")]
 [ClassInterface(ClassInterfaceType.None)]
-public sealed partial class CodexBarCmdPal : IExtension, IDisposable
+public sealed partial class CodexToysExtension : IExtension, IDisposable
 {
     private readonly ManualResetEvent? _extensionDisposedEvent;
-    private readonly CodexBarCommandsProvider _provider = new();
+    private readonly CodexToysCommandsProvider _provider = new();
 
-    public CodexBarCmdPal()
+    public CodexToysExtension()
     {
-        ExtensionLog.Write("CodexBarCmdPal constructed");
+        ExtensionLog.Write("CodexToysExtension constructed");
     }
 
-    public CodexBarCmdPal(ManualResetEvent extensionDisposedEvent)
+    public CodexToysExtension(ManualResetEvent extensionDisposedEvent)
     {
         _extensionDisposedEvent = extensionDisposedEvent;
-        ExtensionLog.Write("CodexBarCmdPal constructed with dispose event");
+        ExtensionLog.Write("CodexToysExtension constructed with dispose event");
     }
 
     public object? GetProvider(ProviderType providerType)
@@ -30,7 +30,7 @@ public sealed partial class CodexBarCmdPal : IExtension, IDisposable
 
     public void Dispose()
     {
-        ExtensionLog.Write("CodexBarCmdPal disposed");
+        ExtensionLog.Write("CodexToysExtension disposed");
         _provider.Dispose();
         _extensionDisposedEvent?.Set();
     }

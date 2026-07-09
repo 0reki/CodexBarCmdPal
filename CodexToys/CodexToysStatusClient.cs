@@ -1,4 +1,4 @@
-namespace CodexBarCmdPal;
+namespace CodexToys;
 
 internal sealed class CodexToysStatusClient
 {
@@ -76,7 +76,7 @@ internal sealed class CodexToysStatusClient
         {
             provider.Subtitle = string.IsNullOrWhiteSpace(provider.Subtitle)
                 ? limits.PlanLabel
-                : $"{limits.PlanLabel} · {provider.Subtitle}";
+                : $"{limits.PlanLabel} - {provider.Subtitle}";
         }
     }
 }

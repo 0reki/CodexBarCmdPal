@@ -158,9 +158,9 @@ function Trust-CertificateIfPossible {
 }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$projectPath = Join-Path $repoRoot "CodexBarCmdPal\CodexBarCmdPal.csproj"
-$manifestPath = Join-Path $repoRoot "CodexBarCmdPal\Package.appxmanifest"
-$packageRoot = Join-Path $repoRoot "CodexBarCmdPal\AppPackages"
+$projectPath = Join-Path $repoRoot "CodexToys\CodexToys.csproj"
+$manifestPath = Join-Path $repoRoot "CodexToys\Package.appxmanifest"
+$packageRoot = Join-Path $repoRoot "CodexToys\AppPackages"
 $cerPath = Join-Path $env:TEMP "CodexToys.cer"
 
 Write-Step "Checking tools"
@@ -185,7 +185,7 @@ Write-Step "Publishing MSIX"
   -c $Configuration `
   -p:Platform=$Platform `
   -p:RuntimeIdentifier=$RuntimeIdentifier `
-  -p:CodexBarWindowsTargetVersion=$windowsTargetVersion `
+  -p:CodexToysWindowsTargetVersion=$windowsTargetVersion `
   -p:GenerateAppxPackageOnBuild=true `
   -p:AppxPackageSigningEnabled=true `
   -p:PackageCertificateThumbprint=$($cert.Thumbprint)

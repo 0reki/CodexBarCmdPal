@@ -1,4 +1,4 @@
-namespace CodexBarCmdPal;
+namespace CodexToys;
 
 internal static class ExtensionLog
 {

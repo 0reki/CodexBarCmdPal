@@ -1,7 +1,7 @@
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 
-namespace CodexBarCmdPal;
+namespace CodexToys;
 
 internal sealed partial class CodexToysCommandsProvider : CommandProvider
 {

@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace CodexBarCmdPal;
+namespace CodexToys;
 
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true)]
 [JsonSerializable(typeof(CodexToysStatusSnapshot))]

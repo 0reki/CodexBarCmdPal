@@ -1,10 +1,10 @@
 {
   "profiles": {
-    "CodexBarCmdPal (Package)": {
+    "CodexToys (Package)": {
       "commandName": "MsixPackage",
       "doNotLaunchApp": true
     },
-    "CodexBarCmdPal (Unpackaged)": {
+    "CodexToys (Unpackaged)": {
       "commandName": "Project"
     }
   }

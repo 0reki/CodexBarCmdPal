@@ -2,38 +2,39 @@ using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 using Windows.Foundation;
 
-namespace CodexBarCmdPal;
+namespace CodexToys;
 
-internal sealed class CodexToysSettings
+internal sealed class CodexToysSettings : JsonSettingsManager
 {
     private const string RefreshIntervalId = "refreshIntervalSeconds";
     private const string ScanDaysId = "scanDays";
     private const string CustomSessionDirsId = "customSessionDirs";
-    private readonly Settings _settings = new();
-
     public CodexToysSettings()
     {
-        _settings.Add(new TextSetting(
+        FilePath = SettingsFilePath();
+
+        Settings.Add(new TextSetting(
             RefreshIntervalId,
             "Refresh interval",
             "Seconds between local log scans",
             "15"));
-        _settings.Add(new TextSetting(
+        Settings.Add(new TextSetting(
             ScanDaysId,
             "Scan days",
             "Number of recent days to scan",
             "30"));
-        _settings.Add(new TextSetting(
+        Settings.Add(new TextSetting(
             CustomSessionDirsId,
             "Codex session dirs",
             "Extra session directories separated by new lines or semicolons",
             ""));
-        _settings.SettingsChanged += OnSettingsChanged;
+
+        LoadSettings();
+        Settings.SettingsChanged += (_, _) => SaveSettings();
+        Settings.SettingsChanged += OnSettingsChanged;
     }
 
     public event EventHandler? SettingsChanged;
-
-    public ICommandSettings Settings => _settings;
 
     public TimeSpan RefreshInterval => TimeSpan.FromSeconds(ReadInt(RefreshIntervalId, 15, 5, 600));
 
@@ -45,7 +46,7 @@ internal sealed class CodexToysSettings
         {
             try
             {
-                return (_settings.GetSetting<string>(CustomSessionDirsId) ?? "")
+                return (Settings.GetSetting<string>(CustomSessionDirsId) ?? "")
                     .Split(['\r', '\n', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .Where(path => !string.IsNullOrWhiteSpace(path))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -64,7 +65,7 @@ internal sealed class CodexToysSettings
         string? raw;
         try
         {
-            raw = _settings.GetSetting<string>(id);
+            raw = Settings.GetSetting<string>(id);
         }
         catch (Exception ex)
         {
@@ -82,5 +83,14 @@ internal sealed class CodexToysSettings
     private void OnSettingsChanged(object sender, Settings args)
     {
         SettingsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static string SettingsFilePath()
+    {
+        var directory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "CodexToys");
+        Directory.CreateDirectory(directory);
+        return Path.Combine(directory, "settings.json");
     }
 }

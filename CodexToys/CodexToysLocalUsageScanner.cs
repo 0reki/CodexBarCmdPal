@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 
-namespace CodexBarCmdPal;
+namespace CodexToys;
 
 internal sealed class CodexToysLocalUsageScanner
 {

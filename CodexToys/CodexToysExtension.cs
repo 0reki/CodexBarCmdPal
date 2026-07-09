@@ -1,7 +1,7 @@
 using Microsoft.CommandPalette.Extensions;
 using System.Runtime.InteropServices;
 
-namespace CodexBarCmdPal;
+namespace CodexToys;
 
 [ComVisible(true)]
 [Guid("00f37f09-1369-4fe4-82a7-8c41796ca5fc")]

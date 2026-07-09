@@ -18,6 +18,12 @@ Build and install:
 .\scripts\install.ps1
 ```
 
+Install from a release:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
 If .NET SDK or Windows SDK is missing, let the script install what it can through
 `winget`:
 

@@ -51,7 +51,7 @@ jobs:
             throw "No Windows SDK UAP platform with Platform.xml was found under $uapRoot."
           }
 
-          [xml]$manifest = Get-Content "CodexBarCmdPal\Package.appxmanifest"
+          [xml]$manifest = Get-Content "CodexToys\Package.appxmanifest"
           $version = $manifest.Package.Identity.Version
 
           "platform=${{ matrix.platform }}" >> $env:GITHUB_OUTPUT
@@ -95,11 +95,11 @@ jobs:
       - name: Publish MSIX
         shell: pwsh
         run: |
-          dotnet publish .\CodexBarCmdPal\CodexBarCmdPal.csproj `
+          dotnet publish .\CodexToys\CodexToys.csproj `
             -c Release `
             -p:Platform=${{ steps.meta.outputs.platform }} `
             -p:RuntimeIdentifier=${{ matrix.rid }} `
-            -p:CodexBarWindowsTargetVersion=${{ steps.meta.outputs.windows_sdk }} `
+            -p:CodexToysWindowsTargetVersion=${{ steps.meta.outputs.windows_sdk }} `
             -p:GenerateAppxPackageOnBuild=true `
             -p:AppxPackageSigningEnabled=true `
             -p:PackageCertificateThumbprint=${{ steps.cert.outputs.thumbprint }}
@@ -114,7 +114,7 @@ jobs:
           $staging = Join-Path "artifacts" $name
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
-          $pkgRoot = "CodexBarCmdPal\AppPackages"
+          $pkgRoot = "CodexToys\AppPackages"
           $msix = Get-ChildItem $pkgRoot -Recurse -Filter *.msix |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1

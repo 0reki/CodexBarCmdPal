@@ -6,6 +6,6 @@
     <_SkipUpgradeNetAnalyzersNuGetWarning>true</_SkipUpgradeNetAnalyzersNuGetWarning>
     <NuGetAuditMode>direct</NuGetAuditMode>
     <PlatformTarget>$(Platform)</PlatformTarget>
-    <CodexToysWindowsTargetVersion Condition="'$(CodexToysWindowsTargetVersion)'==''">10.0.22621.0</CodexToysWindowsTargetVersion>
+    <CodexToysWindowsTargetVersion Condition="'$(CodexToysWindowsTargetVersion)'==''">10.0.26100.0</CodexToysWindowsTargetVersion>
   </PropertyGroup>
 </Project>

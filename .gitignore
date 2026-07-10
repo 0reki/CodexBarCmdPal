@@ -1,4 +1,23 @@
-**/bin/**
-.vs
-**/obj/**
-**/AppPackages/**
+# Visual Studio / .NET build state
+.vs/
+**/bin/
+**/obj/
+**/TestResults/
+*.user
+*.suo
+
+# MSIX packaging and signing outputs
+**/AppPackages/
+**/BundleArtifacts/
+*.appx
+*.appxbundle
+*.msix
+*.msixbundle
+*.pfx
+*.cer
+
+# Local secrets and logs
+.env
+.env.*
+!.env.example
+*.log

@@ -17,7 +17,7 @@ internal sealed class CodexToysSettings : JsonSettingsManager
             RefreshIntervalId,
             "Refresh interval",
             "Seconds between local log scans",
-            "15"));
+            "60"));
         Settings.Add(new TextSetting(
             ScanDaysId,
             "Scan days",
@@ -36,7 +36,7 @@ internal sealed class CodexToysSettings : JsonSettingsManager
 
     public event EventHandler? SettingsChanged;
 
-    public TimeSpan RefreshInterval => TimeSpan.FromSeconds(ReadInt(RefreshIntervalId, 15, 5, 600));
+    public TimeSpan RefreshInterval => TimeSpan.FromSeconds(ReadInt(RefreshIntervalId, 60, 5, 600));
 
     public int ScanDays => ReadInt(ScanDaysId, 30, 1, 365);
 

@@ -18,6 +18,15 @@ Run:
 .\scripts\install.ps1
 ```
 
+## Install A Release Package
+
+Download the Release package for your system architecture and extract it. Open
+PowerShell as administrator in the extracted directory, then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
 ## Troubleshooting
 
 - `0x800B0109`: the signing certificate is not trusted. Rerun `scripts\install.ps1`

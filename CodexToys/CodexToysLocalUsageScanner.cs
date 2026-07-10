@@ -27,6 +27,7 @@ internal sealed class CodexToysLocalUsageScanner
                         LatestTokens = NonZero(summary.TodayTokens),
                         ThirtyDayTokens = NonZero(summary.ThirtyDayTokens),
                         TopModel = summary.TopModel,
+                        TodayTopModel = summary.TodayTopModel,
                         UpdatedAt = DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture),
                         DailyCosts = summary.DailyCosts
                             .OrderBy(point => point.Date, StringComparer.Ordinal)
@@ -543,6 +544,7 @@ internal sealed class CodexToysLocalUsageScanner
     private sealed class CodexUsageSummary
     {
         private readonly Dictionary<string, TokenCounts> _modelTokens = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, TokenCounts> _todayModelTokens = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, CodexDailyUsage> _daily = new(StringComparer.Ordinal);
         private readonly Dictionary<int, CodexHourlyUsage> _hourly = new();
 
@@ -553,6 +555,9 @@ internal sealed class CodexToysLocalUsageScanner
         public string? TopModel => _modelTokens.Count == 0
             ? null
             : _modelTokens.MaxBy(pair => pair.Value.Total).Key;
+        public string? TodayTopModel => _todayModelTokens.Count == 0
+            ? null
+            : _todayModelTokens.MaxBy(pair => pair.Value.Total).Key;
         public bool HasUsage => ThirtyDayCost > 0 || ThirtyDayTokens > 0;
         public IEnumerable<CodexDailyUsage> DailyCosts => _daily.Values;
         public IEnumerable<CodexHourlyUsage> HourlyCosts => _hourly.Values;
@@ -580,6 +585,12 @@ internal sealed class CodexToysLocalUsageScanner
 
                 hourly.Cost += cost;
                 hourly.Tokens += tokenTotal;
+
+                _todayModelTokens.TryGetValue(model, out var todayExisting);
+                _todayModelTokens[model] = new TokenCounts(
+                    todayExisting.Input + tokens.Input,
+                    todayExisting.Cached + tokens.Cached,
+                    todayExisting.Output + tokens.Output);
             }
 
             if (!_daily.TryGetValue(key, out var daily))

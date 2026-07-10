@@ -55,6 +55,9 @@ internal sealed class CodexToysProviderSnapshot
     [JsonPropertyName("topModel")]
     public string? TopModel { get; set; }
 
+    [JsonPropertyName("todayTopModel")]
+    public string? TodayTopModel { get; set; }
+
     [JsonPropertyName("dailyCosts")]
     public List<CodexToysDailyCostPoint> DailyCosts { get; set; } = [];
 

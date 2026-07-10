@@ -166,7 +166,8 @@ internal sealed partial class CodexToysStatusPage : ContentPage
 
     private DetailFields DetailFieldsForMode(CodexToysProviderSnapshot provider, ChartDefinition chart)
     {
-        var model = provider.TopModel ?? "--";
+        var thirtyDayModel = provider.TopModel ?? "--";
+        var todayModel = provider.TodayTopModel ?? "--";
         var peak = chart.Points.Count == 0 ? 0 : chart.Points.Max(point => point.Value);
 
         return _mode switch
@@ -176,22 +177,22 @@ internal sealed partial class CodexToysStatusPage : ContentPage
                 FormatUsd(provider.TodayCost),
                 "Tokens",
                 FormatCount(provider.LatestTokens),
-                "Model",
-                model),
+                "Peak Model",
+                todayModel),
             CodexToysDetailMode.ThirtyDayCost => new DetailFields(
                 "30d",
                 FormatUsd(provider.ThirtyDayCost),
                 "Tokens",
                 FormatCount(provider.ThirtyDayTokens),
-                "Model",
-                model),
+                "Peak Model",
+                thirtyDayModel),
             CodexToysDetailMode.Tokens => new DetailFields(
                 "Tokens",
                 FormatCount(provider.ThirtyDayTokens),
                 "Latest",
                 FormatCount(provider.LatestTokens),
-                "Model",
-                model,
+                "Peak Model",
+                thirtyDayModel,
                 "Peak",
                 chart.FormatValue(peak)),
             _ => new DetailFields(
@@ -201,8 +202,10 @@ internal sealed partial class CodexToysStatusPage : ContentPage
                     : string.IsNullOrWhiteSpace(provider.StatusText) ? "--" : provider.StatusText,
                 provider.SecondaryLabel ?? "Weekly",
                 provider.Secondary is { } secondary ? $"{secondary.UsedPercent:0}%" : "--",
-                "Model",
-                model),
+                "Peak Model",
+                thirtyDayModel,
+                "Est Reset In",
+                FormatResetRemaining(provider.Primary)),
         };
     }
 
@@ -239,6 +242,69 @@ internal sealed partial class CodexToysStatusPage : ContentPage
     private static string FormatUsd(double value)
     {
         return $"${value:0.00}";
+    }
+
+    private static string FormatResetRemaining(CodexToysRateWindowSnapshot? window)
+    {
+        if (window?.ResetsAt is { Length: > 0 } resetsAt &&
+            DateTimeOffset.TryParse(
+                resetsAt,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal,
+                out var parsed))
+        {
+            var remaining = parsed - DateTimeOffset.Now;
+            if (remaining <= TimeSpan.Zero)
+            {
+                return "soon";
+            }
+
+            if (remaining.TotalDays >= 1)
+            {
+                return $"{Math.Ceiling(remaining.TotalDays)}d";
+            }
+
+            if (remaining.TotalHours >= 1)
+            {
+                var hours = (int)remaining.TotalHours;
+                var minutes = (int)Math.Ceiling(remaining.Subtract(TimeSpan.FromHours(hours)).TotalMinutes);
+                return minutes > 0
+                    ? $"{hours}h {minutes}m"
+                    : $"{hours}h";
+            }
+
+            return $"{Math.Ceiling(remaining.TotalMinutes)}m";
+        }
+
+        return FormatResetDescription(window?.ResetDescription);
+    }
+
+    private static string FormatResetDescription(string? description)
+    {
+        if (string.IsNullOrWhiteSpace(description))
+        {
+            return "--";
+        }
+
+        var value = description.Trim();
+        if (value.Equals("resets soon", StringComparison.OrdinalIgnoreCase))
+        {
+            return "soon";
+        }
+
+        const string prefix = "resets in ";
+        if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            value = value[prefix.Length..];
+        }
+
+        const string suffix = " until reset";
+        if (value.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+        {
+            value = value[..(value.Length - suffix.Length)];
+        }
+
+        return string.IsNullOrWhiteSpace(value) ? "--" : value;
     }
 
     private static List<CodexToysHourlyUsagePoint> CompleteHours(IEnumerable<CodexToysHourlyUsagePoint> points)

@@ -40,6 +40,9 @@ internal sealed class CodexToysProviderSnapshot
     [JsonPropertyName("secondary")]
     public CodexToysRateWindowSnapshot? Secondary { get; set; }
 
+    [JsonPropertyName("bankedResets")]
+    public long? BankedResets { get; set; }
+
     [JsonPropertyName("todayCost")]
     public double? TodayCost { get; set; }
 

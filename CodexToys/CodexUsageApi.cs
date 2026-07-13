@@ -200,21 +200,31 @@ internal sealed class CodexUsageApi
     private static CodexUsageLimits ParseLimits(JsonElement root)
     {
         var planType = TryReadString(root, "plan_type");
-        var (primary, secondary) = ExtractRateLimits(root);
+        var (primary, _) = ExtractRateLimits(root);
+        long? bankedResets = null;
+        if (root.TryGetProperty("rate_limit_reset_credits", out var resetCredits) &&
+            resetCredits.ValueKind == JsonValueKind.Object)
+        {
+            bankedResets = TryReadLong(resetCredits, "available_count");
+        }
+
         return new CodexUsageLimits(
             primary,
-            secondary,
+            bankedResets,
             string.IsNullOrWhiteSpace(planType) ? null : PlanLabel(planType));
     }
 
     private static (CodexToysRateWindowSnapshot? Primary, CodexToysRateWindowSnapshot? Secondary) ExtractRateLimits(JsonElement root)
     {
-        if (root.TryGetProperty("rate_limit", out var rateLimit))
+        if (root.TryGetProperty("rate_limit", out var rateLimit) &&
+            rateLimit.ValueKind == JsonValueKind.Object)
         {
-            var primary = rateLimit.TryGetProperty("primary_window", out var primaryWindow)
+            var primary = rateLimit.TryGetProperty("primary_window", out var primaryWindow) &&
+                primaryWindow.ValueKind == JsonValueKind.Object
                 ? ParseWindow(primaryWindow)
                 : null;
-            var secondary = rateLimit.TryGetProperty("secondary_window", out var secondaryWindow)
+            var secondary = rateLimit.TryGetProperty("secondary_window", out var secondaryWindow) &&
+                secondaryWindow.ValueKind == JsonValueKind.Object
                 ? ParseWindow(secondaryWindow)
                 : null;
 
@@ -366,6 +376,6 @@ internal sealed class CodexUsageApi
 }
 
 internal sealed record CodexUsageLimits(
-    CodexToysRateWindowSnapshot? Primary,
-    CodexToysRateWindowSnapshot? Secondary,
+    CodexToysRateWindowSnapshot? Weekly,
+    long? BankedResets,
     string? PlanLabel);

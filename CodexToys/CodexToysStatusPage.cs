@@ -196,12 +196,14 @@ internal sealed partial class CodexToysStatusPage : ContentPage
                 "Peak",
                 chart.FormatValue(peak)),
             _ => new DetailFields(
-                provider.PrimaryLabel ?? "Session",
+                provider.PrimaryLabel ?? "Weekly",
                 provider.Primary is { } primary
                     ? $"{primary.UsedPercent:0}%"
                     : string.IsNullOrWhiteSpace(provider.StatusText) ? "--" : provider.StatusText,
-                provider.SecondaryLabel ?? "Weekly",
-                provider.Secondary is { } secondary ? $"{secondary.UsedPercent:0}%" : "--",
+                provider.SecondaryLabel ?? "Banked resets",
+                provider.BankedResets is long bankedResets
+                    ? bankedResets.ToString(CultureInfo.InvariantCulture)
+                    : "--",
                 "Peak Model",
                 thirtyDayModel,
                 "Est Reset In",

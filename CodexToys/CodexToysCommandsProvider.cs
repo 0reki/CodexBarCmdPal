@@ -207,7 +207,7 @@ internal sealed partial class CodexToysCommandsProvider : CommandProvider
             return $"{provider.SecondaryLabel} {provider.Secondary.UsedPercent:0}%";
         }
 
-        return provider.Subtitle ?? provider.Primary?.ResetDescription ?? "";
+        return provider.PrimaryLabel ?? "Weekly";
     }
 
     private static string FormatUsd(double? value)

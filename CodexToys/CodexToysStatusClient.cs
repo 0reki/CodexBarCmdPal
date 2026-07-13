@@ -59,17 +59,18 @@ internal sealed class CodexToysStatusClient
             return;
         }
 
-        if (limits.Primary is not null)
+        if (limits.Weekly is not null)
         {
-            provider.PrimaryLabel = "Session";
-            provider.Primary = limits.Primary;
-            provider.StatusText = $"{limits.Primary.UsedPercent:0}%";
+            provider.PrimaryLabel = "Weekly";
+            provider.Primary = limits.Weekly;
+            provider.StatusText = $"{limits.Weekly.UsedPercent:0}%";
         }
 
-        if (limits.Secondary is not null)
+        if (limits.BankedResets is not null)
         {
-            provider.SecondaryLabel = "Weekly";
-            provider.Secondary = limits.Secondary;
+            provider.SecondaryLabel = "Banked resets";
+            provider.Secondary = null;
+            provider.BankedResets = limits.BankedResets;
         }
 
         if (!string.IsNullOrWhiteSpace(limits.PlanLabel))

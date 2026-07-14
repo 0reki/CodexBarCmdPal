@@ -21,3 +21,9 @@
 .env.*
 !.env.example
 *.log
+
+
+.agents
+.codex
+.trellis
+AGENTS.md

@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace CodexToys;
 
-internal sealed class CodexUsageApi
+internal sealed class CodexUsageApi : ICodexUsageLimitsSource
 {
     private const string DefaultBaseUrl = "https://chatgpt.com/backend-api";
     private const string UsagePath = "/wham/usage";
@@ -19,7 +19,7 @@ internal sealed class CodexUsageApi
         _settings = settings;
     }
 
-    public async Task<CodexUsageLimits?> FetchAsync(CancellationToken cancellationToken)
+    public async Task<CodexUsageLimitsFetchResult> FetchAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -27,7 +27,7 @@ internal sealed class CodexUsageApi
             if (credentials is null)
             {
                 ExtensionLog.Write("Codex usage API skipped: auth.json not found or missing access_token");
-                return null;
+                return new CodexUsageLimitsFetchResult(null, null);
             }
 
             using var request = new HttpRequestMessage(HttpMethod.Get, $"{ResolveBaseUrl()}{UsagePath}");
@@ -46,17 +46,25 @@ internal sealed class CodexUsageApi
             if (!response.IsSuccessStatusCode)
             {
                 ExtensionLog.Write($"Codex usage API failed: HTTP {(int)response.StatusCode} {response.ReasonPhrase}");
-                return null;
+                return new CodexUsageLimitsFetchResult(
+                    null,
+                    $"Codex limits request failed (HTTP {(int)response.StatusCode}).");
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
             using var document = await JsonDocument.ParseAsync(stream, cancellationToken: timeout.Token).ConfigureAwait(false);
-            return ParseLimits(document.RootElement);
+            return new CodexUsageLimitsFetchResult(ParseLimits(document.RootElement), null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             ExtensionLog.Write($"Codex usage API failed: {ex.GetType().Name}: {ex.Message}");
-            return null;
+            return new CodexUsageLimitsFetchResult(
+                null,
+                $"Codex limits request failed ({ex.GetType().Name}).");
         }
     }
 

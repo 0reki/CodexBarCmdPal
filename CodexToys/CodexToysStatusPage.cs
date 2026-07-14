@@ -21,16 +21,15 @@ internal sealed partial class CodexToysStatusPage : ContentPage
 
     public CodexToysStatusPage(
         CodexToysStatusClient client,
-        CodexToysStatusSnapshot? snapshot,
         CodexToysDetailMode mode = CodexToysDetailMode.Overview,
         IconInfo? icon = null)
     {
         _client = client;
         _mode = mode;
-        _snapshot = snapshot;
         Icon = icon ?? StatusIcon;
         Title = TitleForMode(mode);
         Name = "Open";
+        _content.DataJson = BuildLoadingDataJson(null);
         Commands =
         [
             new CommandContextItem(new RefreshStatusCommand(this))
@@ -48,40 +47,37 @@ internal sealed partial class CodexToysStatusPage : ContentPage
 
     public override IContent[] GetContent()
     {
-        LoadContent(forceRefresh: false);
+        _client.RequestRefresh();
         return [_content];
     }
 
-    private void LoadContent(bool forceRefresh)
+    public void UpdateState(CodexToysRefreshState state)
     {
-        if (forceRefresh)
+        if (state.Snapshot is not null)
         {
-            _client.ClearCache();
+            _snapshot = state.Snapshot;
         }
 
-        _snapshot = _client.ReadSnapshotAsync().GetAwaiter().GetResult() ?? _snapshot;
-        _content.DataJson = BuildDataJson();
+        _content.DataJson = _snapshot is null
+            ? BuildLoadingDataJson(state.RefreshError)
+            : BuildDataJson(state);
     }
 
-    private string BuildDataJson()
+    private void RequestRefresh()
     {
-        if (_snapshot?.Providers.Count > 0 != true)
-        {
-            return new JsonObject
-            {
-                ["errorMessage"] = "No local usage found.",
-            }.ToJsonString();
-        }
+        _client.RequestRefresh();
+    }
 
-        var provider = _snapshot.Providers.FirstOrDefault(provider => provider.Id == "codex")
-            ?? _snapshot.Providers[0];
+    private string BuildDataJson(CodexToysRefreshState state)
+    {
+        var snapshot = _snapshot!;
 
-        if (!string.IsNullOrWhiteSpace(provider.Error))
+        var provider = snapshot.Providers.FirstOrDefault(provider => provider.Id == "codex")
+            ?? snapshot.Providers.FirstOrDefault();
+
+        if (provider is null)
         {
-            return new JsonObject
-            {
-                ["errorMessage"] = $"Local scan failed: {provider.Error}",
-            }.ToJsonString();
+            return BuildLoadingDataJson(state.RefreshError ?? "No local usage found.");
         }
 
         var daily = CompleteDaily(provider.DailyCosts);
@@ -91,9 +87,8 @@ internal sealed partial class CodexToysStatusPage : ContentPage
 
         return new JsonObject
         {
-            ["errorMessage"] = null,
             ["title"] = DetailTitleForMode(_mode),
-            ["subtitle"] = provider.Subtitle ?? "",
+            ["subtitle"] = DetailSubtitle(state, provider),
             ["chartUrl"] = ChartImageUrl(chart),
             ["chartHeight"] = "160px",
             ["chartWidth"] = "520px",
@@ -106,6 +101,68 @@ internal sealed partial class CodexToysStatusPage : ContentPage
             ["rightLabel2"] = fields.RightLabel2,
             ["rightValue2"] = fields.RightValue2,
         }.ToJsonString();
+    }
+
+    private string BuildLoadingDataJson(string? error)
+    {
+        var chart = new ChartDefinition(
+            TitleForMode(_mode),
+            "loading",
+            [],
+            _ => "--",
+            "#8a8a8a");
+        return new JsonObject
+        {
+            ["title"] = DetailTitleForMode(_mode),
+            ["subtitle"] = string.IsNullOrWhiteSpace(error)
+                ? "Loading Codex usage..."
+                : $"Unable to refresh: {error}",
+            ["chartUrl"] = ChartImageUrl(chart),
+            ["chartHeight"] = "160px",
+            ["chartWidth"] = "520px",
+            ["leftLabel1"] = "Usage",
+            ["leftValue1"] = "--",
+            ["leftLabel2"] = "",
+            ["leftValue2"] = "",
+            ["rightLabel1"] = "Status",
+            ["rightValue1"] = "--",
+            ["rightLabel2"] = "",
+            ["rightValue2"] = "",
+        }.ToJsonString();
+    }
+
+    private static string StatusMessage(
+        CodexToysRefreshState state,
+        CodexToysProviderSnapshot provider)
+    {
+        var updatedAt = provider.UpdatedAt ?? state.Snapshot?.UpdatedAt;
+        var updated = DateTimeOffset.TryParse(
+            updatedAt,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal,
+            out var parsed)
+                ? $"Updated {parsed.ToLocalTime():g}"
+                : "Updated recently";
+        if (!string.IsNullOrWhiteSpace(state.RefreshError))
+        {
+            return $"{updated} - Refresh failed: {state.RefreshError}";
+        }
+
+        return state.IsRefreshing ? $"{updated} - Refreshing..." : updated;
+    }
+
+    private static string DetailSubtitle(
+        CodexToysRefreshState state,
+        CodexToysProviderSnapshot provider)
+    {
+        var status = StatusMessage(state, provider);
+        if (string.IsNullOrWhiteSpace(provider.Subtitle))
+        {
+            return status;
+        }
+
+        const string separator = " - ";
+        return $"{provider.Subtitle}{separator}{status}";
     }
 
     private static string TitleForMode(CodexToysDetailMode mode)
@@ -401,9 +458,9 @@ internal sealed partial class CodexToysStatusPage : ContentPage
         return sb.ToString();
     }
 
-    private static string EscapeXml(string value)
+    private static string EscapeXml(string? value)
     {
-        return WebUtility.HtmlEncode(value);
+        return WebUtility.HtmlEncode(value ?? "");
     }
 
     private sealed partial class RefreshStatusCommand : InvokableCommand
@@ -419,7 +476,7 @@ internal sealed partial class CodexToysStatusPage : ContentPage
 
         public override ICommandResult Invoke()
         {
-            _page.LoadContent(forceRefresh: true);
+            _page.RequestRefresh();
             return CommandResult.KeepOpen();
         }
     }
@@ -467,110 +524,87 @@ internal sealed partial class CodexToysStatusPage : ContentPage
       "type": "AdaptiveCard",
       "body": [
         {
-          "type": "Container",
-          "$when": "${errorMessage != null}",
-          "style": "warning",
-          "items": [
-            {
-              "type": "TextBlock",
-              "text": "${errorMessage}",
-              "wrap": true,
-              "size": "medium"
-            }
-          ]
+          "type": "Image",
+          "url": "${chartUrl}",
+          "height": "${chartHeight}",
+          "width": "${chartWidth}",
+          "horizontalAlignment": "center"
         },
         {
-          "type": "Container",
-          "$when": "${errorMessage == null}",
-          "items": [
+          "type": "ColumnSet",
+          "spacing": "large",
+          "columns": [
             {
-              "type": "Image",
-              "url": "${chartUrl}",
-              "height": "${chartHeight}",
-              "width": "${chartWidth}",
-              "horizontalAlignment": "center"
-            },
-            {
-              "type": "ColumnSet",
-              "spacing": "large",
-              "columns": [
+              "type": "Column",
+              "width": "stretch",
+              "items": [
                 {
-                  "type": "Column",
-                  "width": "stretch",
-                  "items": [
-                    {
-                      "type": "TextBlock",
-                      "text": "${leftLabel1}",
-                      "isSubtle": true,
-                      "size": "medium"
-                    },
-                    {
-                      "type": "TextBlock",
-                      "text": "${leftValue1}",
-                      "size": "extraLarge",
-                      "weight": "bolder"
-                    },
-                    {
-                      "type": "TextBlock",
-                      "$when": "${leftLabel2 != ''}",
-                      "text": "${leftLabel2}",
-                      "isSubtle": true,
-                      "spacing": "medium",
-                      "size": "small"
-                    },
-                    {
-                      "type": "TextBlock",
-                      "$when": "${leftLabel2 != ''}",
-                      "text": "${leftValue2}",
-                      "size": "medium",
-                      "weight": "bolder"
-                    },
-                    {
-                      "type": "TextBlock",
-                      "text": "${subtitle}",
-                      "wrap": true,
-                      "isSubtle": true,
-                      "spacing": "large",
-                      "size": "medium"
-                    }
-                  ]
+                  "type": "TextBlock",
+                  "text": "${leftLabel1}",
+                  "isSubtle": true,
+                  "size": "medium"
                 },
                 {
-                  "type": "Column",
-                  "width": "stretch",
-                  "items": [
-                    {
-                      "type": "TextBlock",
-                      "text": "${rightLabel1}",
-                      "isSubtle": true,
-                      "horizontalAlignment": "right",
-                      "size": "medium"
-                    },
-                    {
-                      "type": "TextBlock",
-                      "text": "${rightValue1}",
-                      "size": "extraLarge",
-                      "horizontalAlignment": "right",
-                      "weight": "bolder"
-                    },
-                    {
-                      "type": "TextBlock",
-                      "$when": "${rightLabel2 != ''}",
-                      "text": "${rightLabel2}",
-                      "isSubtle": true,
-                      "horizontalAlignment": "right",
-                      "spacing": "medium",
-                      "size": "small"
-                    },
-                    {
-                      "type": "TextBlock",
-                      "$when": "${rightLabel2 != ''}",
-                      "text": "${rightValue2}",
-                      "size": "medium",
-                      "horizontalAlignment": "right",
-                      "weight": "bolder"
-                    }
-                  ]
+                  "type": "TextBlock",
+                  "text": "${leftValue1}",
+                  "size": "extraLarge",
+                  "weight": "bolder"
+                },
+                {
+                  "type": "TextBlock",
+                  "text": "${leftLabel2}",
+                  "isSubtle": true,
+                  "spacing": "medium",
+                  "size": "small"
+                },
+                {
+                  "type": "TextBlock",
+                  "text": "${leftValue2}",
+                  "size": "medium",
+                  "weight": "bolder"
+                },
+                {
+                  "type": "TextBlock",
+                  "text": "${subtitle}",
+                  "wrap": true,
+                  "isSubtle": true,
+                  "spacing": "large",
+                  "size": "medium"
+                }
+              ]
+            },
+            {
+              "type": "Column",
+              "width": "stretch",
+              "items": [
+                {
+                  "type": "TextBlock",
+                  "text": "${rightLabel1}",
+                  "isSubtle": true,
+                  "horizontalAlignment": "right",
+                  "size": "medium"
+                },
+                {
+                  "type": "TextBlock",
+                  "text": "${rightValue1}",
+                  "size": "extraLarge",
+                  "horizontalAlignment": "right",
+                  "weight": "bolder"
+                },
+                {
+                  "type": "TextBlock",
+                  "text": "${rightLabel2}",
+                  "isSubtle": true,
+                  "horizontalAlignment": "right",
+                  "spacing": "medium",
+                  "size": "small"
+                },
+                {
+                  "type": "TextBlock",
+                  "text": "${rightValue2}",
+                  "size": "medium",
+                  "horizontalAlignment": "right",
+                  "weight": "bolder"
                 }
               ]
             }

@@ -9,6 +9,9 @@ internal sealed class CodexToysSettings : JsonSettingsManager
     private const string RefreshIntervalId = "refreshIntervalSeconds";
     private const string ScanDaysId = "scanDays";
     private const string CustomSessionDirsId = "customSessionDirs";
+    private readonly object _settingsIo = new();
+    private int _loadStarted;
+
     public CodexToysSettings()
     {
         FilePath = SettingsFilePath();
@@ -29,8 +32,7 @@ internal sealed class CodexToysSettings : JsonSettingsManager
             "Extra session directories separated by new lines or semicolons",
             ""));
 
-        LoadSettings();
-        Settings.SettingsChanged += (_, _) => SaveSettings();
+        Settings.SettingsChanged += (_, _) => QueueSaveSettings();
         Settings.SettingsChanged += OnSettingsChanged;
     }
 
@@ -85,12 +87,54 @@ internal sealed class CodexToysSettings : JsonSettingsManager
         SettingsChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public void StartLoading()
+    {
+        if (Interlocked.Exchange(ref _loadStarted, 1) == 0)
+        {
+            _ = Task.Run(LoadSettingsInBackground);
+        }
+    }
+
+    private void QueueSaveSettings()
+    {
+        _ = Task.Run(() =>
+        {
+            lock (_settingsIo)
+            {
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+                    SaveSettings();
+                }
+                catch (Exception ex)
+                {
+                    ExtensionLog.Write($"Failed to save settings: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        });
+    }
+
+    private void LoadSettingsInBackground()
+    {
+        lock (_settingsIo)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+                LoadSettings();
+            }
+            catch (Exception ex)
+            {
+                ExtensionLog.Write($"Failed to load settings: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+    }
+
     private static string SettingsFilePath()
     {
         var directory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "CodexToys");
-        Directory.CreateDirectory(directory);
         return Path.Combine(directory, "settings.json");
     }
 }

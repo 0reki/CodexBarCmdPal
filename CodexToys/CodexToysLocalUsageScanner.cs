@@ -1,348 +1,658 @@
+using System.Buffers;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace CodexToys;
 
-internal sealed class CodexToysLocalUsageScanner
+internal interface ICodexUsageScanner
 {
-    public static CodexToysStatusSnapshot ReadSnapshot(CodexToysSettings settings)
+    CodexToysStatusSnapshot ReadSnapshot(CancellationToken cancellationToken);
+
+    void InvalidateRoots();
+}
+
+internal sealed record CodexScanDiagnostics(
+    int DiscoveredFiles,
+    int OpenedFiles,
+    int ReusedFiles,
+    long BytesRead);
+
+internal sealed class CodexToysLocalUsageScanner : ICodexUsageScanner
+{
+    private const int CacheVersion = 1;
+    private const int ScannerSemanticsVersion = 1;
+    private const int FingerprintBytes = 256;
+    private readonly CodexToysSettings? _settings;
+    private readonly string _cachePath;
+    private readonly IReadOnlyList<string>? _fixedRoots;
+    private readonly int? _fixedScanDays;
+    private readonly Func<DateTime> _todayProvider;
+    private readonly object _stateLock = new();
+    private CodexUsageCache? _cache;
+    private IReadOnlyList<string>? _roots;
+
+    public CodexToysLocalUsageScanner(CodexToysSettings settings, string? cachePath = null)
     {
-        try
+        _settings = settings;
+        _todayProvider = () => DateTime.Now.Date;
+        _cachePath = cachePath ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "CodexToys",
+            "usage-cache-v1.json");
+    }
+
+    internal CodexToysLocalUsageScanner(
+        IReadOnlyList<string> roots,
+        int scanDays,
+        string cachePath,
+        Func<DateTime>? todayProvider = null)
+    {
+        _fixedRoots = roots.Select(Path.GetFullPath).ToArray();
+        _fixedScanDays = scanDays;
+        _cachePath = cachePath;
+        _todayProvider = todayProvider ?? (() => DateTime.Now.Date);
+    }
+
+    internal CodexScanDiagnostics? LastDiagnostics { get; private set; }
+
+    public void InvalidateRoots()
+    {
+        lock (_stateLock)
         {
-            var summary = ScanCodex(settings);
-            return new CodexToysStatusSnapshot
-            {
-                Version = 2,
-                UpdatedAt = DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture),
-                Providers =
-                [
-                    new CodexToysProviderSnapshot
-                    {
-                        Id = "codex",
-                        Name = "Codex",
-                        StatusText = summary.HasUsage ? "Local" : "--",
-                        Subtitle = summary.HasUsage ? "Estimated from local logs" : "No local usage found",
-                        TodayCost = NonZero(summary.TodayCost),
-                        ThirtyDayCost = NonZero(summary.ThirtyDayCost),
-                        LatestTokens = NonZero(summary.TodayTokens),
-                        ThirtyDayTokens = NonZero(summary.ThirtyDayTokens),
-                        TopModel = summary.TopModel,
-                        TodayTopModel = summary.TodayTopModel,
-                        UpdatedAt = DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture),
-                        DailyCosts = summary.DailyCosts
-                            .OrderBy(point => point.Date, StringComparer.Ordinal)
-                            .Select(point => new CodexToysDailyCostPoint
-                            {
-                                Date = point.Date,
-                                Cost = point.Cost,
-                                Tokens = point.Tokens,
-                            })
-                            .ToList(),
-                        HourlyCosts = summary.HourlyCosts
-                            .OrderBy(point => point.Hour)
-                            .Select(point => new CodexToysHourlyUsagePoint
-                            {
-                                Hour = point.Hour,
-                                Cost = point.Cost,
-                                Tokens = point.Tokens,
-                            })
-                            .ToList(),
-                    },
-                ],
-            };
-        }
-        catch (Exception ex)
-        {
-            ExtensionLog.Write($"Local scan failed: {ex.GetType().Name}: {ex.Message}");
-            return new CodexToysStatusSnapshot
-            {
-                Version = 2,
-                UpdatedAt = DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture),
-                Providers =
-                [
-                    new CodexToysProviderSnapshot
-                    {
-                        Id = "codex",
-                        Name = "Codex",
-                        StatusText = "error",
-                        Subtitle = "Local scan failed",
-                        Error = ex.Message,
-                        UpdatedAt = DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture),
-                    },
-                ],
-            };
+            _roots = null;
         }
     }
 
-    private static CodexUsageSummary ScanCodex(CodexToysSettings settings)
+    public CodexToysStatusSnapshot ReadSnapshot(CancellationToken cancellationToken)
     {
-        var today = DateTimeOffset.Now.LocalDateTime.Date;
-        var since = today.AddDays(-(settings.ScanDays - 1));
-        var roots = CodexSessionRoots(settings).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var summary = new CodexUsageSummary();
-        var scannedFiles = 0;
-        var failedFiles = 0;
+        var today = _todayProvider().Date;
+        var scanDays = _fixedScanDays ?? _settings!.ScanDays;
+        var since = today.AddDays(-(scanDays - 1));
+        var roots = SessionRoots();
+        var signature = CacheSignature(roots, scanDays);
+        var cache = LoadCache();
+        if (cache.Version != CacheVersion ||
+            cache.ScannerSemanticsVersion != ScannerSemanticsVersion ||
+            !string.Equals(cache.Signature, signature, StringComparison.Ordinal))
+        {
+            cache = NewCache(signature, roots);
+        }
 
         var scanSince = since.AddDays(-1);
         var scanUntil = today.AddDays(1);
+        var discovered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var openedFiles = 0;
+        var reusedFiles = 0;
+        long bytesRead = 0;
 
         ExtensionLog.Write(
-            $"Local scan start: since={since:yyyy-MM-dd}, until={today:yyyy-MM-dd}, scanSince={scanSince:yyyy-MM-dd}, scanUntil={scanUntil:yyyy-MM-dd}, roots={string.Join(" | ", roots)}");
+            $"Incremental scan start: since={since:yyyy-MM-dd}, until={today:yyyy-MM-dd}, roots={string.Join(" | ", roots)}");
 
         foreach (var root in roots)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!Directory.Exists(root))
             {
-                ExtensionLog.Write($"Local scan root missing: {root}");
+                if (cache.Files.Keys.Any(path => IsUnderRoot(path, root)))
+                {
+                    throw new IOException($"Previously scanned session root is unavailable: {root}");
+                }
+
                 continue;
             }
 
-            ExtensionLog.Write($"Local scan root: {root}");
-            var rootCostBefore = summary.ThirtyDayCost;
-            var rootTokensBefore = summary.ThirtyDayTokens;
-            var rootScannedBefore = scannedFiles;
-            var rootFailedBefore = failedFiles;
-            foreach (var file in EnumerateSessionFiles(root, scanSince, scanUntil))
+            foreach (var file in EnumerateSessionFiles(root, scanSince, scanUntil, cancellationToken))
             {
-                if (ScanFile(file, since, today, summary))
-                {
-                    scannedFiles++;
-                }
-                else
-                {
-                    failedFiles++;
-                }
-            }
+                cancellationToken.ThrowIfCancellationRequested();
+                var normalized = Path.GetFullPath(file);
+                discovered.Add(normalized);
+                var info = new FileInfo(normalized);
+                cache.Files.TryGetValue(normalized, out var prior);
 
-            ExtensionLog.Write(
-                $"Local scan root done: {root}, scannedFiles={scannedFiles - rootScannedBefore}, failedFiles={failedFiles - rootFailedBefore}, costDelta={summary.ThirtyDayCost - rootCostBefore:0.0000}, tokensDelta={summary.ThirtyDayTokens - rootTokensBefore}");
+                if (prior is not null &&
+                    prior.ObservedLength == info.Length &&
+                    prior.LastWriteUtcTicks == info.LastWriteTimeUtc.Ticks)
+                {
+                    reusedFiles++;
+                    continue;
+                }
+
+                var updated = ScanChangedFile(
+                    normalized,
+                    info,
+                    prior,
+                    since,
+                    today,
+                    cancellationToken,
+                    out var read);
+                cache.Files[normalized] = updated;
+                openedFiles++;
+                bytesRead += read;
+            }
         }
 
+        foreach (var path in cache.Files.Keys.Where(path => !discovered.Contains(path)).ToArray())
+        {
+            cache.Files.Remove(path);
+        }
+
+        foreach (var state in cache.Files.Values)
+        {
+            state.Contributions.RemoveAll(point =>
+                !TryDate(point.Date, out var date) || date < since || date > today);
+        }
+
+        cache.Signature = signature;
+        cache.Roots = [.. roots];
+        cache.UpdatedAt = DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture);
+        var snapshot = BuildSnapshot(cache, since, today);
+        SaveCache(cache);
+        lock (_stateLock)
+        {
+            _cache = cache;
+        }
+
+        LastDiagnostics = new CodexScanDiagnostics(
+            discovered.Count,
+            openedFiles,
+            reusedFiles,
+            bytesRead);
+
         ExtensionLog.Write(
-            $"Local scan done: scannedFiles={scannedFiles}, failedFiles={failedFiles}, totalCost={summary.ThirtyDayCost:0.0000}, totalTokens={summary.ThirtyDayTokens}");
-        return summary;
+            $"Incremental scan done: discovered={discovered.Count}, opened={openedFiles}, reused={reusedFiles}, bytesRead={bytesRead}");
+        return snapshot;
     }
 
-    private static IEnumerable<string> CodexSessionRoots(CodexToysSettings settings)
+    private CodexUsageCache LoadCache()
     {
+        lock (_stateLock)
+        {
+            if (_cache is not null)
+            {
+                return _cache;
+            }
+        }
+
+        CodexUsageCache cache;
+        try
+        {
+            if (!File.Exists(_cachePath))
+            {
+                cache = NewCache("", []);
+            }
+            else
+            {
+                using var stream = File.OpenRead(_cachePath);
+                cache = JsonSerializer.Deserialize(stream, CodexToysJsonContext.Default.CodexUsageCache)
+                    ?? NewCache("", []);
+                cache.Files = new Dictionary<string, CodexFileScanState>(
+                    cache.Files,
+                    StringComparer.OrdinalIgnoreCase);
+            }
+        }
+        catch (Exception ex)
+        {
+            ExtensionLog.Write($"Usage cache load failed: {ex.GetType().Name}: {ex.Message}");
+            cache = NewCache("", []);
+        }
+
+        lock (_stateLock)
+        {
+            return _cache ??= cache;
+        }
+    }
+
+    private void SaveCache(CodexUsageCache cache)
+    {
+        string? temporary = null;
+        try
+        {
+            var directory = Path.GetDirectoryName(_cachePath)!;
+            Directory.CreateDirectory(directory);
+            temporary = $"{_cachePath}.{Environment.ProcessId}.tmp";
+            using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                JsonSerializer.Serialize(stream, cache, CodexToysJsonContext.Default.CodexUsageCache);
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temporary, _cachePath, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            ExtensionLog.Write($"Usage cache save failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            if (temporary is not null)
+            {
+                try
+                {
+                    File.Delete(temporary);
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
+
+    private IReadOnlyList<string> SessionRoots()
+    {
+        lock (_stateLock)
+        {
+            if (_roots is not null)
+            {
+                return _roots;
+            }
+        }
+
+
+        if (_fixedRoots is not null)
+        {
+            lock (_stateLock)
+            {
+                return _roots ??= _fixedRoots;
+            }
+        }
+
+        var roots = new List<string>();
         var codexHome = Environment.GetEnvironmentVariable("CODEX_HOME");
         if (!string.IsNullOrWhiteSpace(codexHome))
         {
-            yield return NormalizeCodexSessionsDir(codexHome);
+            roots.Add(NormalizeSessionsDir(codexHome));
         }
         else
         {
             var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             if (!string.IsNullOrWhiteSpace(userProfile))
             {
-                yield return Path.Combine(userProfile, ".codex", "sessions");
+                roots.Add(Path.Combine(userProfile, ".codex", "sessions"));
             }
         }
 
-        foreach (var customDir in settings.CustomSessionDirs)
-        {
-            yield return NormalizeCodexSessionsDir(customDir);
-        }
+        roots.AddRange(_settings!.CustomSessionDirs.Select(NormalizeSessionsDir));
+        roots.AddRange(DiscoverWslSessionDirs());
+        var distinct = roots
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => Path.GetFullPath(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
-        foreach (var wslDir in DiscoverWslCodexSessionDirs())
+        lock (_stateLock)
         {
-            yield return wslDir;
+            return _roots ??= distinct;
         }
     }
 
-    private static string NormalizeCodexSessionsDir(string path)
+    private static CodexFileScanState ScanChangedFile(
+        string path,
+        FileInfo info,
+        CodexFileScanState? prior,
+        DateTime since,
+        DateTime today,
+        CancellationToken cancellationToken,
+        out long bytesRead)
     {
-        var trimmed = path.Trim();
-        return string.Equals(Path.GetFileName(trimmed), "sessions", StringComparison.OrdinalIgnoreCase)
-            ? trimmed
-            : Path.Combine(trimmed, "sessions");
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: 64 * 1024,
+            FileOptions.SequentialScan);
+
+        var fingerprintBytesRead = 0;
+        var canAppend = false;
+        if (prior is not null &&
+            info.Length > prior.ObservedLength &&
+            prior.CommittedOffset <= info.Length)
+        {
+            var observedFingerprint = BoundaryFingerprint(
+                stream,
+                prior.CommittedOffset,
+                out var observedFingerprintBytes);
+            fingerprintBytesRead += observedFingerprintBytes;
+            canAppend = string.Equals(
+                prior.BoundaryFingerprint,
+                observedFingerprint,
+                StringComparison.Ordinal);
+        }
+
+        var state = canAppend
+            ? prior!
+            : new CodexFileScanState
+            {
+                CurrentModel = "gpt-5",
+                Contributions = [],
+            };
+        var startOffset = canAppend ? state.CommittedOffset : 0;
+        stream.Position = startOffset;
+        var parsedBytes = ReadCompleteLines(
+            stream,
+            state,
+            since,
+            today,
+            startOffset,
+            cancellationToken);
+
+        state.ObservedLength = stream.Length;
+        state.BoundaryFingerprint = BoundaryFingerprint(
+            stream,
+            state.CommittedOffset,
+            out var committedFingerprintBytes);
+        bytesRead = parsedBytes + fingerprintBytesRead + committedFingerprintBytes;
+        info.Refresh();
+        state.LastWriteUtcTicks = info.LastWriteTimeUtc.Ticks;
+        return state;
     }
 
-    private static IEnumerable<string> DiscoverWslCodexSessionDirs()
+    private static long ReadCompleteLines(
+        FileStream stream,
+        CodexFileScanState state,
+        DateTime since,
+        DateTime today,
+        long startOffset,
+        CancellationToken cancellationToken)
     {
-        foreach (var root in DefaultWslRoots())
+        var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+        using var line = new MemoryStream();
+        var absoluteOffset = startOffset;
+        var committedOffset = startOffset;
+        try
         {
-            IEnumerable<string> distros;
-            try
+            int read;
+            while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
             {
-                distros = Directory.EnumerateDirectories(root).ToList();
-            }
-            catch (Exception ex)
-            {
-                if (Directory.Exists(root))
+                cancellationToken.ThrowIfCancellationRequested();
+                var segmentStart = 0;
+                for (var index = 0; index < read; index++)
                 {
-                    ExtensionLog.Write($"Failed to enumerate WSL root {root}: {ex.GetType().Name}: {ex.Message}");
+                    if (buffer[index] != (byte)'\n')
+                    {
+                        continue;
+                    }
+
+                    line.Write(buffer, segmentStart, index - segmentStart);
+                    ProcessLine(line, state, since, today);
+                    line.SetLength(0);
+                    committedOffset = absoluteOffset + index + 1;
+                    segmentStart = index + 1;
                 }
 
+                if (segmentStart < read)
+                {
+                    line.Write(buffer, segmentStart, read - segmentStart);
+                }
+
+                absoluteOffset += read;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        state.CommittedOffset = committedOffset;
+        return absoluteOffset - startOffset;
+    }
+
+    private static void ProcessLine(
+        MemoryStream line,
+        CodexFileScanState state,
+        DateTime since,
+        DateTime today)
+    {
+        var bytes = line.GetBuffer().AsSpan(0, checked((int)line.Length));
+        if (!bytes.IsEmpty && bytes[^1] == (byte)'\r')
+        {
+            bytes = bytes[..^1];
+        }
+
+        if (bytes.IsEmpty || !IsCandidateLine(bytes))
+        {
+            return;
+        }
+
+        using var document = TryParse(bytes);
+        if (document is null)
+        {
+            return;
+        }
+
+        var root = document.RootElement;
+        if (string.Equals(GetString(root, "type"), "turn_context", StringComparison.Ordinal))
+        {
+            state.CurrentModel = ReadModel(root) ?? state.CurrentModel;
+            return;
+        }
+
+        if (!TryGetTokenPayload(root, out var payload))
+        {
+            return;
+        }
+
+        var timestamp = GetString(root, "timestamp");
+        if (!TryLocalTimestamp(timestamp, out var localTime) ||
+            localTime.Date < since ||
+            localTime.Date > today)
+        {
+            return;
+        }
+
+        state.CurrentModel = ReadModel(payload) ?? ReadModel(root) ?? state.CurrentModel;
+        var delta = ReadUsageDelta(payload, state);
+        if (!delta.IsEmpty)
+        {
+            AddContribution(state, localTime, state.CurrentModel, delta);
+        }
+    }
+
+    private static void AddContribution(
+        CodexFileScanState state,
+        DateTime localTime,
+        string model,
+        CodexTokenCounts tokens)
+    {
+        var date = localTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var bucket = state.Contributions.FirstOrDefault(point =>
+            point.Hour == localTime.Hour &&
+            string.Equals(point.Date, date, StringComparison.Ordinal) &&
+            string.Equals(point.Model, model, StringComparison.OrdinalIgnoreCase));
+        if (bucket is null)
+        {
+            bucket = new CodexUsageContribution
+            {
+                Date = date,
+                Hour = localTime.Hour,
+                Model = model,
+            };
+            state.Contributions.Add(bucket);
+        }
+
+        bucket.InputTokens += tokens.Input;
+        bucket.CachedInputTokens += tokens.Cached;
+        bucket.OutputTokens += tokens.Output;
+        bucket.Cost += CodexPricing.CostUsd(model, tokens.Input, tokens.Cached, tokens.Output);
+    }
+
+    private static CodexToysStatusSnapshot BuildSnapshot(
+        CodexUsageCache cache,
+        DateTime since,
+        DateTime today)
+    {
+        var daily = new Dictionary<string, CodexToysDailyCostPoint>(StringComparer.Ordinal);
+        var hourly = new Dictionary<int, CodexToysHourlyUsagePoint>();
+        var models = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
+        var todayModels = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
+        double todayCost = 0;
+        double totalCost = 0;
+        ulong todayTokens = 0;
+        ulong totalTokens = 0;
+
+        foreach (var point in cache.Files.Values.SelectMany(state => state.Contributions))
+        {
+            if (!TryDate(point.Date, out var date) || date < since || date > today)
+            {
                 continue;
             }
 
-            foreach (var distro in distros)
+            var tokens = point.InputTokens + point.OutputTokens;
+            totalCost += point.Cost;
+            totalTokens += tokens;
+            models[point.Model] = models.GetValueOrDefault(point.Model) + tokens;
+
+            if (!daily.TryGetValue(point.Date, out var dailyPoint))
             {
-                var homesDir = Path.Combine(distro, "home");
-                IEnumerable<string> users;
-                try
-                {
-                    users = Directory.Exists(homesDir)
-                        ? Directory.EnumerateDirectories(homesDir).ToList()
-                        : [];
-                }
-                catch (Exception ex)
-                {
-                    ExtensionLog.Write($"Failed to enumerate WSL homes {homesDir}: {ex.GetType().Name}: {ex.Message}");
-                    users = [];
-                }
-
-                foreach (var user in users)
-                {
-                    var sessionsDir = Path.Combine(user, ".codex", "sessions");
-                    if (Directory.Exists(sessionsDir))
-                    {
-                        yield return sessionsDir;
-                    }
-                }
-
-                var rootSessionsDir = Path.Combine(distro, "root", ".codex", "sessions");
-                if (Directory.Exists(rootSessionsDir))
-                {
-                    yield return rootSessionsDir;
-                }
+                dailyPoint = new CodexToysDailyCostPoint { Date = point.Date };
+                daily[point.Date] = dailyPoint;
             }
+
+            dailyPoint.Cost += point.Cost;
+            dailyPoint.Tokens += tokens;
+
+            if (date != today)
+            {
+                continue;
+            }
+
+            todayCost += point.Cost;
+            todayTokens += tokens;
+            todayModels[point.Model] = todayModels.GetValueOrDefault(point.Model) + tokens;
+            if (!hourly.TryGetValue(point.Hour, out var hourlyPoint))
+            {
+                hourlyPoint = new CodexToysHourlyUsagePoint { Hour = point.Hour };
+                hourly[point.Hour] = hourlyPoint;
+            }
+
+            hourlyPoint.Cost += point.Cost;
+            hourlyPoint.Tokens += tokens;
         }
+
+        var now = DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture);
+        return new CodexToysStatusSnapshot
+        {
+            Version = 2,
+            UpdatedAt = now,
+            Providers =
+            [
+                new CodexToysProviderSnapshot
+                {
+                    Id = "codex",
+                    Name = "Codex",
+                    StatusText = totalTokens > 0 || totalCost > 0 ? "Local" : "--",
+                    Subtitle = totalTokens > 0 || totalCost > 0
+                        ? null
+                        : "No local usage found",
+                    TodayCost = NonZero(todayCost),
+                    ThirtyDayCost = NonZero(totalCost),
+                    LatestTokens = NonZero(todayTokens),
+                    ThirtyDayTokens = NonZero(totalTokens),
+                    TopModel = TopModel(models),
+                    TodayTopModel = TopModel(todayModels),
+                    DailyCosts = daily.Values.OrderBy(point => point.Date, StringComparer.Ordinal).ToList(),
+                    HourlyCosts = hourly.Values.OrderBy(point => point.Hour).ToList(),
+                    UpdatedAt = now,
+                },
+            ],
+        };
     }
 
-    private static IEnumerable<string> DefaultWslRoots()
+    private static string? TopModel(Dictionary<string, ulong> models)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            yield break;
-        }
-
-        const string preferred = @"\\wsl.localhost";
-        if (Directory.Exists(preferred))
-        {
-            yield return preferred;
-            yield break;
-        }
-
-        yield return @"\\wsl$";
+        return models.Count == 0 ? null : models.MaxBy(pair => pair.Value).Key;
     }
 
-    private static IEnumerable<string> EnumerateSessionFiles(string root, DateTime since, DateTime until)
+    private static IEnumerable<string> EnumerateSessionFiles(
+        string root,
+        DateTime since,
+        DateTime until,
+        CancellationToken cancellationToken)
     {
         for (var date = since; date <= until; date = date.AddDays(1))
         {
-            var dayDir = Path.Combine(
+            cancellationToken.ThrowIfCancellationRequested();
+            var dayDirectory = Path.Combine(
                 root,
                 date.Year.ToString("0000", CultureInfo.InvariantCulture),
                 date.Month.ToString("00", CultureInfo.InvariantCulture),
                 date.Day.ToString("00", CultureInfo.InvariantCulture));
-
-            if (!Directory.Exists(dayDir))
+            if (!Directory.Exists(dayDirectory))
             {
                 continue;
             }
 
-            IEnumerable<string> files;
-            try
-            {
-                files = Directory.EnumerateFiles(dayDir, "*.jsonl", SearchOption.TopDirectoryOnly).ToList();
-            }
-            catch (Exception ex)
-            {
-                ExtensionLog.Write($"Failed to enumerate {dayDir}: {ex.GetType().Name}: {ex.Message}");
-                continue;
-            }
-
-            foreach (var file in files)
+            foreach (var file in Directory.EnumerateFiles(dayDirectory, "*.jsonl", SearchOption.TopDirectoryOnly))
             {
                 yield return file;
             }
         }
     }
 
-    private static bool ScanFile(string file, DateTime since, DateTime until, CodexUsageSummary summary)
+    private static IEnumerable<string> DiscoverWslSessionDirs()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            yield break;
+        }
+
+        var root = Directory.Exists(@"\\wsl.localhost") ? @"\\wsl.localhost" : @"\\wsl$";
+        IEnumerable<string> distros;
         try
         {
-            var currentModel = "gpt-5";
-            TokenCounts? previousTotals = null;
-
-            using var stream = new FileStream(
-                file,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
-            using var reader = new StreamReader(stream);
-
-            string? line;
-            while ((line = reader.ReadLine()) is not null)
-            {
-                if (!IsCandidateLine(line))
-                {
-                    continue;
-                }
-
-                using var doc = TryParse(line);
-                if (doc is null)
-                {
-                    continue;
-                }
-
-                var root = doc.RootElement;
-                var type = GetString(root, "type");
-                if (string.Equals(type, "turn_context", StringComparison.Ordinal))
-                {
-                    currentModel = ReadModel(root) ?? currentModel;
-                    continue;
-                }
-
-                if (!TryGetTokenPayload(root, out var payload))
-                {
-                    continue;
-                }
-
-                var timestamp = GetString(root, "timestamp");
-                if (!TryLocalTimestamp(timestamp, out var localTime) ||
-                    localTime.Date < since ||
-                    localTime.Date > until)
-                {
-                    continue;
-                }
-
-                currentModel = ReadModel(payload) ?? ReadModel(root) ?? currentModel;
-                var delta = ReadUsageDelta(payload, ref previousTotals);
-                if (delta.IsEmpty)
-                {
-                    continue;
-                }
-
-                summary.Add(localTime, currentModel, delta);
-            }
-
-            return true;
+            distros = Directory.Exists(root) ? Directory.EnumerateDirectories(root).ToArray() : [];
         }
         catch (Exception ex)
         {
-            ExtensionLog.Write($"Failed to scan {file}: {ex.GetType().Name}: {ex.Message}");
-            return false;
+            ExtensionLog.Write($"WSL discovery failed: {ex.GetType().Name}: {ex.Message}");
+            yield break;
+        }
+
+        foreach (var distro in distros)
+        {
+            var homes = Path.Combine(distro, "home");
+            IEnumerable<string> users;
+            try
+            {
+                users = Directory.Exists(homes) ? Directory.EnumerateDirectories(homes).ToArray() : [];
+            }
+            catch
+            {
+                users = [];
+            }
+
+            foreach (var user in users)
+            {
+                var sessions = Path.Combine(user, ".codex", "sessions");
+                if (Directory.Exists(sessions))
+                {
+                    yield return sessions;
+                }
+            }
+
+            var rootSessions = Path.Combine(distro, "root", ".codex", "sessions");
+            if (Directory.Exists(rootSessions))
+            {
+                yield return rootSessions;
+            }
         }
     }
 
-    private static bool IsCandidateLine(string line)
+    private static bool IsCandidateLine(ReadOnlySpan<byte> line)
     {
-        return line.Contains("\"turn_context\"", StringComparison.Ordinal) ||
-            (line.Contains("\"event_msg\"", StringComparison.Ordinal) &&
-             line.Contains("\"token_count\"", StringComparison.Ordinal));
+        return line.IndexOf("\"turn_context\""u8) >= 0 || line.IndexOf("\"token_count\""u8) >= 0;
     }
 
-    private static JsonDocument? TryParse(string line)
+    private static JsonDocument? TryParse(ReadOnlySpan<byte> line)
     {
         try
         {
-            return JsonDocument.Parse(line);
+            return JsonDocument.Parse(line.ToArray());
         }
-        catch
+        catch (JsonException)
         {
             return null;
         }
@@ -350,23 +660,19 @@ internal sealed class CodexToysLocalUsageScanner
 
     private static bool TryGetTokenPayload(JsonElement root, out JsonElement payload)
     {
-        if (root.ValueKind != JsonValueKind.Object)
-        {
-            payload = default;
-            return false;
-        }
-
-        if (root.TryGetProperty("payload", out var direct) &&
+        if (root.ValueKind == JsonValueKind.Object &&
+            root.TryGetProperty("payload", out var direct) &&
             string.Equals(GetString(direct, "type"), "token_count", StringComparison.Ordinal))
         {
             payload = direct;
             return true;
         }
 
-        if (root.TryGetProperty("event_msg", out var eventMsg) &&
-            string.Equals(GetString(eventMsg, "type"), "token_count", StringComparison.Ordinal))
+        if (root.ValueKind == JsonValueKind.Object &&
+            root.TryGetProperty("event_msg", out var eventMessage) &&
+            string.Equals(GetString(eventMessage, "type"), "token_count", StringComparison.Ordinal))
         {
-            payload = eventMsg;
+            payload = eventMessage;
             return true;
         }
 
@@ -374,15 +680,14 @@ internal sealed class CodexToysLocalUsageScanner
         return false;
     }
 
-    private static TokenCounts ReadUsageDelta(JsonElement payload, ref TokenCounts? previousTotals)
+    private static CodexTokenCounts ReadUsageDelta(JsonElement payload, CodexFileScanState state)
     {
         if (payload.ValueKind != JsonValueKind.Object)
         {
-            return default;
+            return new CodexTokenCounts();
         }
 
-        if (payload.TryGetProperty("info", out var info) &&
-            info.ValueKind == JsonValueKind.Object)
+        if (payload.TryGetProperty("info", out var info) && info.ValueKind == JsonValueKind.Object)
         {
             if (info.TryGetProperty("last_token_usage", out var last))
             {
@@ -391,7 +696,7 @@ internal sealed class CodexToysLocalUsageScanner
 
             if (info.TryGetProperty("total_token_usage", out var total))
             {
-                return TotalDelta(ReadTokenCounts(total), ref previousTotals);
+                return TotalDelta(ReadTokenCounts(total), state);
             }
         }
 
@@ -402,49 +707,48 @@ internal sealed class CodexToysLocalUsageScanner
 
         if (payload.TryGetProperty("total_token_usage", out var payloadTotal))
         {
-            return TotalDelta(ReadTokenCounts(payloadTotal), ref previousTotals);
+            return TotalDelta(ReadTokenCounts(payloadTotal), state);
         }
 
-        var direct = ReadTokenCounts(payload);
-        return direct.IsEmpty ? direct : direct.Positive();
+        return ReadTokenCounts(payload).Positive();
     }
 
-    private static TokenCounts TotalDelta(TokenCounts total, ref TokenCounts? previousTotals)
+    private static CodexTokenCounts TotalDelta(CodexTokenCounts total, CodexFileScanState state)
     {
-        var previous = previousTotals ?? default;
-        previousTotals = total;
-        return new TokenCounts(
-            total.Input > previous.Input ? total.Input - previous.Input : 0,
-            total.Cached > previous.Cached ? total.Cached - previous.Cached : 0,
-            total.Output > previous.Output ? total.Output - previous.Output : 0);
+        var previous = state.PreviousTotals ?? new CodexTokenCounts();
+        state.PreviousTotals = total;
+        return new CodexTokenCounts
+        {
+            Input = total.Input > previous.Input ? total.Input - previous.Input : 0,
+            Cached = total.Cached > previous.Cached ? total.Cached - previous.Cached : 0,
+            Output = total.Output > previous.Output ? total.Output - previous.Output : 0,
+        };
     }
 
-    private static TokenCounts ReadTokenCounts(JsonElement value)
+    private static CodexTokenCounts ReadTokenCounts(JsonElement value)
     {
         if (value.ValueKind != JsonValueKind.Object)
         {
-            return default;
+            return new CodexTokenCounts();
         }
 
-        return new TokenCounts(
-            ReadUlong(value, "input_tokens"),
-            ReadCachedTokens(value),
-            ReadUlong(value, "output_tokens"));
-    }
-
-    private static ulong ReadCachedTokens(JsonElement value)
-    {
+        var input = ReadUlong(value, "input_tokens");
         var cached = ReadUlong(value, "cached_input_tokens");
-        return cached > 0 ? cached : ReadUlong(value, "cache_read_input_tokens");
+        if (cached == 0)
+        {
+            cached = ReadUlong(value, "cache_read_input_tokens");
+        }
+
+        return new CodexTokenCounts
+        {
+            Input = input,
+            Cached = cached,
+            Output = ReadUlong(value, "output_tokens"),
+        };
     }
 
     private static ulong ReadUlong(JsonElement value, string propertyName)
     {
-        if (value.ValueKind != JsonValueKind.Object)
-        {
-            return 0;
-        }
-
         if (!value.TryGetProperty(propertyName, out var property))
         {
             return 0;
@@ -475,22 +779,12 @@ internal sealed class CodexToysLocalUsageScanner
             return modelName;
         }
 
-        if (value.TryGetProperty("payload", out var payload) &&
-            payload.ValueKind == JsonValueKind.Object)
+        if (value.TryGetProperty("payload", out var payload) && ReadModel(payload) is { Length: > 0 } nested)
         {
-            if (ReadModel(payload) is { Length: > 0 } payloadModel)
-            {
-                return payloadModel;
-            }
+            return nested;
         }
 
-        if (value.TryGetProperty("info", out var info) &&
-            info.ValueKind == JsonValueKind.Object)
-        {
-            return ReadModel(info);
-        }
-
-        return null;
+        return value.TryGetProperty("info", out var info) ? ReadModel(info) : null;
     }
 
     private static string? GetString(JsonElement value, string propertyName)
@@ -504,7 +798,11 @@ internal sealed class CodexToysLocalUsageScanner
 
     private static bool TryLocalTimestamp(string? timestamp, out DateTime localTime)
     {
-        if (DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed))
+        if (DateTimeOffset.TryParse(
+            timestamp,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal,
+            out var parsed))
         {
             localTime = parsed.LocalDateTime;
             return true;
@@ -512,7 +810,12 @@ internal sealed class CodexToysLocalUsageScanner
 
         if (!string.IsNullOrWhiteSpace(timestamp) &&
             timestamp.Length >= 10 &&
-            DateTime.TryParseExact(timestamp[..10], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var fallback))
+            DateTime.TryParseExact(
+                timestamp[..10],
+                "yyyy-MM-dd",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var fallback))
         {
             localTime = fallback.Date;
             return true;
@@ -522,105 +825,174 @@ internal sealed class CodexToysLocalUsageScanner
         return false;
     }
 
-    private static double? NonZero(double value)
+    private static string BoundaryFingerprint(FileStream stream, long offset, out int bytesRead)
     {
-        return value > 0 ? value : null;
-    }
-
-    private static ulong? NonZero(ulong value)
-    {
-        return value > 0 ? value : null;
-    }
-
-    private readonly record struct TokenCounts(ulong Input, ulong Cached, ulong Output)
-    {
-        public bool IsEmpty => Input == 0 && Cached == 0 && Output == 0;
-
-        public TokenCounts Positive() => new(Input, Math.Min(Cached, Input), Output);
-
-        public ulong Total => Input + Output;
-    }
-
-    private sealed class CodexUsageSummary
-    {
-        private readonly Dictionary<string, TokenCounts> _modelTokens = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, TokenCounts> _todayModelTokens = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, CodexDailyUsage> _daily = new(StringComparer.Ordinal);
-        private readonly Dictionary<int, CodexHourlyUsage> _hourly = new();
-
-        public double TodayCost { get; private set; }
-        public double ThirtyDayCost { get; private set; }
-        public ulong TodayTokens { get; private set; }
-        public ulong ThirtyDayTokens { get; private set; }
-        public string? TopModel => _modelTokens.Count == 0
-            ? null
-            : _modelTokens.MaxBy(pair => pair.Value.Total).Key;
-        public string? TodayTopModel => _todayModelTokens.Count == 0
-            ? null
-            : _todayModelTokens.MaxBy(pair => pair.Value.Total).Key;
-        public bool HasUsage => ThirtyDayCost > 0 || ThirtyDayTokens > 0;
-        public IEnumerable<CodexDailyUsage> DailyCosts => _daily.Values;
-        public IEnumerable<CodexHourlyUsage> HourlyCosts => _hourly.Values;
-
-        public void Add(DateTime localTime, string model, TokenCounts tokens)
+        if (offset <= 0)
         {
-            var cost = CodexPricing.CostUsd(model, tokens.Input, tokens.Cached, tokens.Output);
-            var tokenTotal = tokens.Total;
-            var day = localTime.Date;
-            var key = day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-
-            ThirtyDayCost += cost;
-            ThirtyDayTokens += tokenTotal;
-
-            if (day == DateTime.Now.Date)
-            {
-                TodayCost += cost;
-                TodayTokens += tokenTotal;
-
-                if (!_hourly.TryGetValue(localTime.Hour, out var hourly))
-                {
-                    hourly = new CodexHourlyUsage { Hour = localTime.Hour };
-                    _hourly[localTime.Hour] = hourly;
-                }
-
-                hourly.Cost += cost;
-                hourly.Tokens += tokenTotal;
-
-                _todayModelTokens.TryGetValue(model, out var todayExisting);
-                _todayModelTokens[model] = new TokenCounts(
-                    todayExisting.Input + tokens.Input,
-                    todayExisting.Cached + tokens.Cached,
-                    todayExisting.Output + tokens.Output);
-            }
-
-            if (!_daily.TryGetValue(key, out var daily))
-            {
-                daily = new CodexDailyUsage { Date = key };
-                _daily[key] = daily;
-            }
-
-            daily.Cost += cost;
-            daily.Tokens += tokenTotal;
-
-            _modelTokens.TryGetValue(model, out var existing);
-            _modelTokens[model] = new TokenCounts(
-                existing.Input + tokens.Input,
-                existing.Cached + tokens.Cached,
-                existing.Output + tokens.Output);
+            bytesRead = 0;
+            return "";
         }
+
+        var original = stream.Position;
+        var count = checked((int)Math.Min(FingerprintBytes, offset));
+        var bytes = new byte[count];
+        stream.Position = offset - count;
+        var total = 0;
+        while (total < count)
+        {
+            var read = stream.Read(bytes, total, count - total);
+            if (read == 0)
+            {
+                break;
+            }
+
+            total += read;
+        }
+
+        stream.Position = original;
+        bytesRead = total;
+        return Convert.ToHexString(SHA256.HashData(bytes.AsSpan(0, total)));
     }
 
-    private sealed class CodexDailyUsage
+    private static CodexUsageCache NewCache(string signature, IReadOnlyList<string> roots)
     {
-        public string Date { get; set; } = "";
-        public double Cost { get; set; }
-        public ulong Tokens { get; set; }
+        return new CodexUsageCache
+        {
+            Version = CacheVersion,
+            ScannerSemanticsVersion = ScannerSemanticsVersion,
+            Signature = signature,
+            Roots = [.. roots],
+            Files = new Dictionary<string, CodexFileScanState>(StringComparer.OrdinalIgnoreCase),
+        };
     }
 
-    private sealed class CodexHourlyUsage
+    private static string CacheSignature(IReadOnlyList<string> roots, int scanDays)
     {
-        public int Hour { get; set; }
-        public double Cost { get; set; }
-        public ulong Tokens { get; set; }
+        var value = $"{scanDays}|{string.Join("|", roots.Order(StringComparer.OrdinalIgnoreCase))}";
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
     }
+
+    private static bool IsUnderRoot(string path, string root)
+    {
+        var normalizedRoot = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+            Path.DirectorySeparatorChar;
+        return path.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeSessionsDir(string path)
+    {
+        var trimmed = path.Trim();
+        return string.Equals(Path.GetFileName(trimmed), "sessions", StringComparison.OrdinalIgnoreCase)
+            ? trimmed
+            : Path.Combine(trimmed, "sessions");
+    }
+
+    private static bool TryDate(string value, out DateTime date)
+    {
+        return DateTime.TryParseExact(
+            value,
+            "yyyy-MM-dd",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out date);
+    }
+
+    private static double? NonZero(double value) => value > 0 ? value : null;
+
+    private static ulong? NonZero(ulong value) => value > 0 ? value : null;
+}
+
+internal sealed class CodexUsageCache
+{
+    [JsonPropertyName("version")]
+    public int Version { get; set; }
+
+    [JsonPropertyName("scannerSemanticsVersion")]
+    public int ScannerSemanticsVersion { get; set; }
+
+    [JsonPropertyName("signature")]
+    public string Signature { get; set; } = "";
+
+    [JsonPropertyName("updatedAt")]
+    public string? UpdatedAt { get; set; }
+
+    [JsonPropertyName("roots")]
+    public List<string> Roots { get; set; } = [];
+
+    [JsonPropertyName("files")]
+    public Dictionary<string, CodexFileScanState> Files { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
+}
+
+internal sealed class CodexFileScanState
+{
+    [JsonPropertyName("observedLength")]
+    public long ObservedLength { get; set; }
+
+    [JsonPropertyName("lastWriteUtcTicks")]
+    public long LastWriteUtcTicks { get; set; }
+
+    [JsonPropertyName("committedOffset")]
+    public long CommittedOffset { get; set; }
+
+    [JsonPropertyName("boundaryFingerprint")]
+    public string BoundaryFingerprint { get; set; } = "";
+
+    [JsonPropertyName("currentModel")]
+    public string CurrentModel { get; set; } = "gpt-5";
+
+    [JsonPropertyName("previousTotals")]
+    public CodexTokenCounts? PreviousTotals { get; set; }
+
+    [JsonPropertyName("contributions")]
+    public List<CodexUsageContribution> Contributions { get; set; } = [];
+}
+
+internal sealed class CodexTokenCounts
+{
+    [JsonPropertyName("input")]
+    public ulong Input { get; set; }
+
+    [JsonPropertyName("cached")]
+    public ulong Cached { get; set; }
+
+    [JsonPropertyName("output")]
+    public ulong Output { get; set; }
+
+    [JsonIgnore]
+    public bool IsEmpty => Input == 0 && Cached == 0 && Output == 0;
+
+    public CodexTokenCounts Positive()
+    {
+        return new CodexTokenCounts
+        {
+            Input = Input,
+            Cached = Math.Min(Cached, Input),
+            Output = Output,
+        };
+    }
+}
+
+internal sealed class CodexUsageContribution
+{
+    [JsonPropertyName("date")]
+    public string Date { get; set; } = "";
+
+    [JsonPropertyName("hour")]
+    public int Hour { get; set; }
+
+    [JsonPropertyName("model")]
+    public string Model { get; set; } = "gpt-5";
+
+    [JsonPropertyName("inputTokens")]
+    public ulong InputTokens { get; set; }
+
+    [JsonPropertyName("cachedInputTokens")]
+    public ulong CachedInputTokens { get; set; }
+
+    [JsonPropertyName("outputTokens")]
+    public ulong OutputTokens { get; set; }
+
+    [JsonPropertyName("cost")]
+    public double Cost { get; set; }
 }

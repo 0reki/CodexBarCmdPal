@@ -15,7 +15,7 @@ internal sealed partial class CodexToysCommandsProvider : CommandProvider
         IconHelpers.FromRelativePaths("Assets/coins-light.svg", "Assets/coins-dark.svg");
     private readonly CodexToysSettings _settings = new();
     private readonly CodexToysStatusClient _client;
-    private readonly CodexToysStatusPage _statusPage;
+    private readonly List<CodexToysStatusPage> _statusPages = [];
     private readonly ICommandItem[] _topLevelCommands;
     private readonly ICommandItem[] _dockBands;
     private readonly ListItem _usageItem;
@@ -33,15 +33,13 @@ internal sealed partial class CodexToysCommandsProvider : CommandProvider
         Settings = _settings.Settings;
         ExtensionLog.Write("CodexToysCommandsProvider constructed");
         _client = new CodexToysStatusClient(_settings);
-        _settings.SettingsChanged += OnSettingsChanged;
+        _client.StateChanged += OnStateChanged;
 
-        _statusPage = new CodexToysStatusPage(_client, _snapshot, CodexToysDetailMode.Overview, CodexIcon)
-        {
-            Id = "codextoys.page.status",
-        };
+        var statusPage = CreateStatusPage(CodexToysDetailMode.Overview, CodexIcon);
+        statusPage.Id = "codextoys.page.status";
         _topLevelCommands =
         [
-            new CommandItem(_statusPage)
+            new CommandItem(statusPage)
             {
                 Title = "CodexToys",
                 Subtitle = "Open usage details",
@@ -62,10 +60,14 @@ internal sealed partial class CodexToysCommandsProvider : CommandProvider
         ];
 
         _refreshTimer = new Timer(
-            _ => QueueRefresh(),
+            _ => _client.RequestRefresh(),
             null,
-            TimeSpan.FromSeconds(1),
+            _settings.RefreshInterval,
             _settings.RefreshInterval);
+        _settings.SettingsChanged += OnSettingsChanged;
+        _settings.StartLoading();
+        OnStateChanged(_client.CurrentState);
+        _client.RequestRefresh();
     }
 
     public override ICommandItem[] TopLevelCommands()
@@ -97,41 +99,30 @@ internal sealed partial class CodexToysCommandsProvider : CommandProvider
     public override void Dispose()
     {
         _settings.SettingsChanged -= OnSettingsChanged;
+        _client.StateChanged -= OnStateChanged;
         _refreshTimer.Dispose();
+        _client.Dispose();
         base.Dispose();
     }
 
     private void OnSettingsChanged(object? sender, EventArgs e)
     {
-        _client.ClearCache();
-        _refreshTimer.Change(TimeSpan.FromSeconds(1), _settings.RefreshInterval);
-        QueueRefresh();
+        _refreshTimer.Change(_settings.RefreshInterval, _settings.RefreshInterval);
+        _client.SettingsChanged();
     }
 
-    private void QueueRefresh()
+    private void OnStateChanged(CodexToysRefreshState state)
     {
-        _ = Task.Run(async () =>
+        if (state.Snapshot is not null)
         {
-            try
-            {
-                await RefreshAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                ExtensionLog.Write($"Refresh failed: {ex.GetType().Name}: {ex.Message}");
-            }
-        });
-    }
-
-    private async Task RefreshAsync()
-    {
-        var next = await _client.ReadSnapshotAsync().ConfigureAwait(false);
-        if (next is not null)
-        {
-            _snapshot = next;
+            _snapshot = state.Snapshot;
         }
 
         UpdateDockItems();
+        foreach (var page in _statusPages)
+        {
+            page.UpdateState(state);
+        }
     }
 
     private static CodexToysProviderSnapshot? PreferredProvider(CodexToysStatusSnapshot? snapshot)
@@ -155,11 +146,9 @@ internal sealed partial class CodexToysCommandsProvider : CommandProvider
 
     private ListItem DockItem(string id, string title, string subtitle, IconInfo icon, CodexToysDetailMode mode)
     {
-        var command = new CodexToysStatusPage(_client, _snapshot, mode, icon)
-        {
-            Id = id,
-            Name = title,
-        };
+        var command = CreateStatusPage(mode, icon);
+        command.Id = id;
+        command.Name = title;
 
         return new ListItem(command)
         {
@@ -167,6 +156,13 @@ internal sealed partial class CodexToysCommandsProvider : CommandProvider
             Subtitle = subtitle,
             Icon = icon,
         };
+    }
+
+    private CodexToysStatusPage CreateStatusPage(CodexToysDetailMode mode, IconInfo icon)
+    {
+        var page = new CodexToysStatusPage(_client, mode, icon);
+        _statusPages.Add(page);
+        return page;
     }
 
     private void UpdateDockItems()

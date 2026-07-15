@@ -1,6 +1,32 @@
 # CodexToys
 
+> [!NOTE]
+> The [extension branch](https://github.com/0reki/CodexToys/tree/extension) provides a CodexBar-based extension for [Finesssee/Win-CodexBar](https://github.com/Finesssee/Win-CodexBar).
+> It is currently pending an update.
+
 A PowerToys Command Palette extension for checking local Codex usage at a glance.
+
+## Preview
+
+### Dock
+
+![CodexToys Command Palette dock preview](./assets/img/dock.png)
+
+### Account And Limits
+
+![CodexToys account and limits preview](./assets/img/account.png)
+
+### Today Usage
+
+![CodexToys today usage preview](./assets/img/daily.png)
+
+### 30-Day Usage
+
+![CodexToys 30-day usage preview](./assets/img/month.png)
+
+### Token Usage
+
+![CodexToys token usage preview](./assets/img/tokens.png)
 
 ## Requirements
 
